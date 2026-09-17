@@ -119,6 +119,6 @@ function applyStrategy(
     imageId: s.imageId,
     instanceNumber: s.instanceNumber,
     sliceLocation: s.sliceLocation,
-    zPosition: s.imagePositionPatient[axisIdx],
+    zPosition: s.positionAlongNormal ?? s.imagePositionPatient[axisIdx],
   }));
 }

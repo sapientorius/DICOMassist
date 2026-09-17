@@ -15,7 +15,7 @@ export interface SelectionPlan {
   reasoning: string;
   selections: SeriesSelection[];
   totalImages: number;
-  // Legacy shortcuts from selections[0] — used by App.tsx viewport logic
+  // Compatibility shortcuts from selections[0] — used by viewport navigation.
   targetSeries: string;
   sliceRange: [number, number];
   windowCenter: number;

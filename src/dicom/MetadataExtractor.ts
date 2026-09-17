@@ -1,5 +1,5 @@
 import type { DataSet } from 'dicom-parser';
-import { detectPlaneFromOrientation } from './orientationUtils';
+import { detectPlaneFromOrientation, positionAlongNormal, sliceNormalFromOrientation } from './orientationUtils';
 import type { SliceMetadata, SeriesMetadata, StudyMetadata } from './types';
 
 /** Raw per-file metadata extracted during the parse pass. */
@@ -205,13 +205,15 @@ export function buildStudyMetadata(records: RawFileRecord[]): StudyMetadata {
     const rep = recs[0]; // representative file for series-level tags
     const iopStr = rep.imageOrientationPatient.join('\\');
     const plane = detectPlaneFromOrientation(iopStr);
+    const sliceNormal = sliceNormalFromOrientation(rep.imageOrientationPatient);
 
-    // Sort slices within series by z-position, fallback to instance number
-    const allSameZ = recs.every((r) => r.zPosition === recs[0].zPosition);
-    if (allSameZ) {
+    // Sort by projection onto the acquisition normal, which works for all planes including oblique stacks.
+    const projectedPositions = recs.map((record) => positionAlongNormal(record.imagePositionPatient, sliceNormal));
+    const allSamePosition = projectedPositions.every((position) => position === projectedPositions[0]);
+    if (allSamePosition) {
       recs.sort((a, b) => a.instanceNumber - b.instanceNumber);
     } else {
-      recs.sort((a, b) => a.zPosition - b.zPosition);
+      recs.sort((a, b) => positionAlongNormal(a.imagePositionPatient, sliceNormal) - positionAlongNormal(b.imagePositionPatient, sliceNormal));
     }
 
     const slices: SliceMetadata[] = recs.map((r) => ({
@@ -219,11 +221,12 @@ export function buildStudyMetadata(records: RawFileRecord[]): StudyMetadata {
       imagePositionPatient: r.imagePositionPatient,
       imageOrientationPatient: r.imageOrientationPatient,
       sliceLocation: r.sliceLocation,
+      positionAlongNormal: positionAlongNormal(r.imagePositionPatient, sliceNormal),
       imageId: r.imageId,
     }));
 
     // Compute z-coverage from sorted slices
-    const zPositions = recs.map((r) => r.zPosition);
+    const zPositions = recs.map((r) => positionAlongNormal(r.imagePositionPatient, sliceNormal));
     const zMin = Math.min(...zPositions);
     const zMax = Math.max(...zPositions);
     const zCoverageInMm = Math.abs(zMax - zMin);
@@ -263,6 +266,7 @@ export function buildStudyMetadata(records: RawFileRecord[]): StudyMetadata {
       kvp: rep.kvp,
       xrayTubeCurrent: rep.xrayTubeCurrent,
       anatomicalPlane,
+      sliceNormal,
       isScout,
       priorityScore: 0, // computed after construction
       zMin,

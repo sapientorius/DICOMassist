@@ -21,12 +21,12 @@ export async function loadSampleData(
   let loaded = 0;
 
   const reader = response.body!.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: ArrayBuffer[] = [];
 
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
+    chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength) as ArrayBuffer);
     loaded += value.length;
     if (total > 0) {
       onProgress?.({ phase: 'downloading', percent: Math.round((loaded / total) * 100) });

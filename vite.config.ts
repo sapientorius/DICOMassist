@@ -1,11 +1,11 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import vue from '@vitejs/plugin-vue';
 import tailwindcss from '@tailwindcss/vite';
 import { viteCommonjs } from '@originjs/vite-plugin-commonjs';
 
 export default defineConfig({
   plugins: [
-    react(),
+    vue(),
     tailwindcss(),
     viteCommonjs(),
   ],
@@ -17,4 +17,8 @@ export default defineConfig({
     format: 'es',
   },
   assetsInclude: ['**/*.wasm'],
+  build: {
+    // Cornerstone's rendering and codec runtime is intentionally loaded as one lazy viewer chunk.
+    chunkSizeWarningLimit: 2100,
+  },
 });

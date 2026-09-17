@@ -3,6 +3,8 @@ export interface SliceMetadata {
   imagePositionPatient: [number, number, number];
   imageOrientationPatient: [number, number, number, number, number, number];
   sliceLocation?: number;
+  /** Position projected on the series slice normal; valid for oblique stacks too. */
+  positionAlongNormal?: number;
   imageId: string;
 }
 
@@ -35,6 +37,7 @@ export interface SeriesMetadata {
   xrayTubeCurrent?: number;
 
   anatomicalPlane: 'axial' | 'coronal' | 'sagittal' | 'oblique';
+  sliceNormal: [number, number, number];
   isScout: boolean;
   priorityScore: number;
   zMin: number;

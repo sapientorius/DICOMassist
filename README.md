@@ -75,10 +75,29 @@ To try DICOMassist, you can use public DICOM datasets:
 
 ## Tech Stack
 
-- **React 18** + TypeScript + Vite
+- **Vue 3** + Composition API + TypeScript + Vite
 - **Cornerstone3D v4** — medical image rendering, viewport management, tools
 - **Claude API**, **OpenAI**, **OpenRouter** — cloud LLM providers
 - **Ollama**, **LM Studio** — optional local model providers
+
+## Development and verification
+
+```bash
+npm install
+npm run dev
+npm run lint
+npm run test
+npm run build
+npm run test:e2e
+```
+
+`test` covers the DICOM geometry helpers, slice selection, LLM-plan guardrails,
+provider requests, and Vue toolbar behavior. `test:e2e` starts the Vite app and
+uses Playwright/Chromium to check the browser landing workflow.
+
+The UI is implemented with Vue single-file components. Framework-neutral DICOM,
+filtering, and LLM modules remain TypeScript modules, while viewer and chat state
+are managed through Vue composables and lifecycle hooks.
 
 ## Architecture
 
