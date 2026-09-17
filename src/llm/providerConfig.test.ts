@@ -135,6 +135,43 @@ describe('Claude provider requests', () => {
     await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toBe('analysis');
     await expect(service.sendFollowUp([{ id: '1', role: 'user', content: 'Explain more', timestamp: 1 }], metadata)).resolves.toBe('follow-up');
 
+    const planningBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const analysisBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    const followUpBody = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    expect(planningBody).toMatchObject({
+      model: 'claude-sonnet-5',
+      max_tokens: 4096,
+      thinking: { type: 'adaptive' },
+      output_config: {
+        format: {
+          type: 'json_schema',
+          schema: {
+            additionalProperties: false,
+            required: ['reasoning', 'selections', 'totalImages'],
+            properties: {
+              selections: {
+                minItems: 1,
+                items: {
+                  additionalProperties: false,
+                  required: [
+                    'seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy',
+                    'samplingParam', 'windowCenter', 'windowWidth',
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(planningBody.output_config.format.schema.properties.selections.items.properties.samplingParam).toEqual({
+      anyOf: [{ type: 'number' }, { type: 'null' }],
+    });
+    expect(analysisBody).not.toHaveProperty('output_config');
+    expect(analysisBody).not.toHaveProperty('thinking');
+    expect(followUpBody).not.toHaveProperty('output_config');
+    expect(followUpBody).not.toHaveProperty('thinking');
+
     for (const [, request] of fetchMock.mock.calls) {
       const body = JSON.parse(request.body as string);
       expect(body).not.toHaveProperty('temperature');
@@ -161,6 +198,8 @@ describe('Claude provider requests', () => {
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     expect(body.temperature).toBe(0);
+    expect(body).not.toHaveProperty('thinking');
+    expect(body).toHaveProperty('output_config.format.schema');
   });
 
   it('omits temperature for Claude Opus 4.7 and newer', async () => {
@@ -181,5 +220,69 @@ describe('Claude provider requests', () => {
       const body = JSON.parse(request.body as string);
       expect(body).not.toHaveProperty('temperature');
     }
+  });
+
+  it('retries a truncated selection plan once with a larger output budget', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [{ type: 'text', text: '{"reasoning":"partial' }],
+        stop_reason: 'max_tokens',
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [{ type: 'text', text: selectionPlanJson }],
+        stop_reason: 'end_turn',
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const service = createLLMService(claudeConfig);
+    await expect(service.getSelectionPlan(metadata, 'look for a finding')).resolves.toMatchObject({ targetSeries: '1' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    const retryBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(firstBody.max_tokens).toBe(4096);
+    expect(retryBody.max_tokens).toBe(8192);
+    expect(retryBody.output_config).toEqual(firstBody.output_config);
+    expect(retryBody.thinking).toEqual({ type: 'adaptive' });
+  });
+
+  it('reports a clear error after the selection-plan retry is also truncated', async () => {
+    const truncatedResponse = () => new Response(JSON.stringify({
+      content: [{ type: 'text', text: '{"reasoning":"partial' }],
+      stop_reason: 'max_tokens',
+    }), { status: 200 });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(truncatedResponse())
+      .mockResolvedValueOnce(truncatedResponse());
+    vi.stubGlobal('fetch', fetchMock);
+
+    const service = createLLMService(claudeConfig);
+    await expect(service.getSelectionPlan(metadata, 'look for a finding')).rejects.toThrow(
+      'Claude model "claude-sonnet-5" truncated the selection plan at the 8,192-token limit',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports Claude refusals and missing text blocks without masking them as JSON errors', async () => {
+    const refusalFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      content: [{ type: 'text', text: 'I cannot help with that.' }],
+      stop_reason: 'refusal',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', refusalFetch);
+
+    const service = createLLMService(claudeConfig);
+    await expect(service.getSelectionPlan(metadata, 'look for a finding')).rejects.toThrow(
+      'Claude model "claude-sonnet-5" refused to create a selection plan',
+    );
+
+    const emptyFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      content: [{ type: 'thinking', thinking: 'considering the study' }],
+      stop_reason: 'end_turn',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', emptyFetch);
+
+    await expect(service.getSelectionPlan(metadata, 'look for a finding')).rejects.toThrow(
+      'Claude model "claude-sonnet-5" returned no text for the selection plan (stop reason: end_turn)',
+    );
   });
 });

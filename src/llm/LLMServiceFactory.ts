@@ -28,6 +28,56 @@ interface ChatMessagePayload {
   content: unknown;
 }
 
+interface ClaudeResponse {
+  text: string;
+  stopReason?: string | null;
+}
+
+interface ClaudeCallParams {
+  system: string;
+  messages: Array<{ role: string; content: unknown }>;
+  maxTokens: number;
+  outputSchema?: Record<string, unknown>;
+  adaptiveThinking?: boolean;
+}
+
+/**
+ * The schema is deliberately limited to features supported by Anthropic's
+ * structured-output grammar. Range and image-budget guardrails remain in
+ * useLLMChat, where they can be checked against the actual study metadata.
+ */
+const SELECTION_PLAN_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    reasoning: { type: 'string' },
+    selections: {
+      type: 'array',
+      minItems: 1,
+      items: {
+        type: 'object',
+        properties: {
+          seriesNumber: { type: 'string' },
+          role: { type: 'string', enum: ['primary', 'supplementary'] },
+          rationale: { type: 'string' },
+          sliceRange: { type: 'array', items: { type: 'number' } },
+          samplingStrategy: { type: 'string', enum: ['uniform', 'every_nth', 'all'] },
+          samplingParam: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+          windowCenter: { type: 'number' },
+          windowWidth: { type: 'number' },
+        },
+        required: [
+          'seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy',
+          'samplingParam', 'windowCenter', 'windowWidth',
+        ],
+        additionalProperties: false,
+      },
+    },
+    totalImages: { type: 'number' },
+  },
+  required: ['reasoning', 'selections', 'totalImages'],
+  additionalProperties: false,
+};
+
 // --- Shared Helpers ---
 
 function extractJson(text: string): string {
@@ -189,12 +239,40 @@ class ClaudeService implements LLMService {
   }
 
   async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext): Promise<SelectionPlan> {
-    const response = await this.callClaude(this.textModel, {
+    const params: ClaudeCallParams = {
       system: buildSelectionSystemPrompt(),
       messages: [{ role: 'user', content: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext) }],
-      maxTokens: 1024,
-    });
-    return parseSelectionPlan(response);
+      maxTokens: 4096,
+      outputSchema: SELECTION_PLAN_OUTPUT_SCHEMA,
+      adaptiveThinking: this.supportsAdaptiveThinking(this.textModel),
+    };
+
+    let response = await this.callClaude(this.textModel, params);
+    if (response.stopReason === 'max_tokens') {
+      response = await this.callClaude(this.textModel, { ...params, maxTokens: 8192 });
+      if (response.stopReason === 'max_tokens') {
+        throw new Error(
+          `Claude model "${this.textModel}" truncated the selection plan at the 8,192-token limit. ` +
+          'Try a shorter clinical prompt and run the analysis again.',
+        );
+      }
+    }
+
+    if (response.stopReason === 'refusal') {
+      throw new Error(
+        `Claude model "${this.textModel}" refused to create a selection plan. ` +
+        'Rephrase the clinical prompt and try again.',
+      );
+    }
+
+    if (!response.text.trim()) {
+      throw new Error(
+        `Claude model "${this.textModel}" returned no text for the selection plan ` +
+        `(stop reason: ${response.stopReason ?? 'unknown'}).`,
+      );
+    }
+
+    return parseSelectionPlan(response.text);
   }
 
   async analyzeSlices(
@@ -207,28 +285,28 @@ class ClaudeService implements LLMService {
       },
       { type: 'text' as const, text: sliceLabels[index] ?? `Image ${index + 1}` },
     ]));
-    return this.callClaude(this.visionModel, {
+    return (await this.callClaude(this.visionModel, {
       system: buildAnalysisSystemPrompt(surveyMode),
       messages: [{
         role: 'user',
         content: [...imageContents.flat(), { type: 'text' as const, text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels) }],
       }],
       maxTokens: 4096,
-    });
+    })).text;
   }
 
   async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata): Promise<string> {
-    return this.callClaude(this.textModel, {
+    return (await this.callClaude(this.textModel, {
       system: `${buildFollowUpSystemPrompt()}\n\nStudy context: ${metadata.studyDescription}`,
       messages: conversationHistory.map((message) => ({ role: message.role, content: message.content })),
       maxTokens: 4096,
-    });
+    })).text;
   }
 
   private async callClaude(
     model: string,
-    params: { system: string; messages: Array<{ role: string; content: unknown }>; maxTokens: number },
-  ): Promise<string> {
+    params: ClaudeCallParams,
+  ): Promise<ClaudeResponse> {
     let response: Response;
     try {
       response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -241,6 +319,12 @@ class ClaudeService implements LLMService {
           model,
           max_tokens: params.maxTokens,
           ...(this.shouldOmitTemperature(model) ? {} : { temperature: 0 }),
+          ...(params.adaptiveThinking ? { thinking: { type: 'adaptive' } } : {}),
+          ...(params.outputSchema ? {
+            output_config: {
+              format: { type: 'json_schema', schema: params.outputSchema },
+            },
+          } : {}),
           system: params.system,
           messages: params.messages,
         }),
@@ -250,8 +334,19 @@ class ClaudeService implements LLMService {
       throw connectionError(error, PROVIDER_LABELS.claude);
     }
     if (!response.ok) throw await responseError(response, PROVIDER_LABELS.claude);
-    const data = await response.json() as { content?: Array<{ type?: string; text?: string }> };
-    return data.content?.find((block) => block.type === 'text')?.text ?? '';
+    const data = await response.json() as {
+      content?: Array<{ type?: string; text?: string }>;
+      stop_reason?: string | null;
+    };
+    return {
+      text: data.content?.find((block) => block.type === 'text')?.text ?? '',
+      stopReason: data.stop_reason,
+    };
+  }
+
+  /** Claude Sonnet/Opus 5 support adaptive thinking; older models do not. */
+  private supportsAdaptiveThinking(model: string): boolean {
+    return /^claude-(?:sonnet|opus)-5(?:-|$)/i.test(model.trim());
   }
 
   /**
