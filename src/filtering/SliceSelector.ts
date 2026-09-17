@@ -105,7 +105,11 @@ function applyStrategy(
 
     case 'uniform': {
       const count = Math.min(params.samplingParam ?? 10, slices.length);
-      if (count >= slices.length) {
+      if (count === 0) {
+        selected = [];
+      } else if (count === 1) {
+        selected = [slices[Math.floor((slices.length - 1) / 2)]];
+      } else if (count >= slices.length) {
         selected = [...slices];
       } else {
         selected = [];

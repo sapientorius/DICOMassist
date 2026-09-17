@@ -58,6 +58,11 @@ let cineTimer: number | undefined;
 
 const gridCount = computed(() => props.layout === '2x2' ? 4 : 2);
 const gridClass = computed(() => props.layout === '1x2' ? 'grid-cols-2' : props.layout === '2x1' ? 'grid-rows-2' : 'grid-cols-2 grid-rows-2');
+const stackTools = [WindowLevelTool, PanTool, ZoomTool, StackScrollTool, LengthTool, AngleTool, EllipticalROITool, PlanarRotateTool];
+
+function toolsForCurrentLayout() {
+  return props.layout === 'mpr' ? [...stackTools, CrosshairsTool] : stackTools;
+}
 
 function registerTools(): void {
   if (toolsRegistered) return;
@@ -85,8 +90,7 @@ function destroyViewer(): void {
 function createToolGroup(viewportIds: string[], engine: RenderingEngine) {
   const group = ToolGroupManager.createToolGroup(TOOL_GROUP_ID);
   if (!group) throw new Error('Unable to create the Cornerstone tool group.');
-  [WindowLevelTool, PanTool, ZoomTool, StackScrollTool, LengthTool, AngleTool, EllipticalROITool, CrosshairsTool, PlanarRotateTool]
-    .forEach((tool) => group.addTool(tool.toolName));
+  toolsForCurrentLayout().forEach((tool) => group.addTool(tool.toolName));
   viewportIds.forEach((viewportId) => group.addViewport(viewportId, engine.id));
   group.setToolActive(StackScrollTool.toolName, { bindings: [{ mouseButton: ToolsEnums.MouseBindings.Wheel }] });
   return group;
@@ -103,14 +107,19 @@ function activeToolName(): string {
     Crosshairs: CrosshairsTool.toolName,
     Rotate: PlanarRotateTool.toolName,
   };
-  return names[props.activeTool];
+  // Crosshairs synchronizes the intersection of multiple volume viewports.
+  // It must not be added to a stack-only group: Cornerstone dispatches its
+  // hover callback without annotations in that case.
+  return props.activeTool === 'Crosshairs' && props.layout !== 'mpr'
+    ? WindowLevelTool.toolName
+    : names[props.activeTool];
 }
 
 function applyActiveTool(): void {
   const group = ToolGroupManager.getToolGroup(TOOL_GROUP_ID);
   if (!group) return;
   const active = activeToolName();
-  [WindowLevelTool, PanTool, ZoomTool, LengthTool, AngleTool, EllipticalROITool, CrosshairsTool, PlanarRotateTool].forEach((tool) => {
+  toolsForCurrentLayout().filter((tool) => tool !== StackScrollTool).forEach((tool) => {
     if (tool.toolName !== active) group.setToolPassive(tool.toolName);
   });
   group.setToolActive(active, { bindings: [{ mouseButton: ToolsEnums.MouseBindings.Primary }] });

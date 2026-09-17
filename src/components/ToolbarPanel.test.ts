@@ -10,4 +10,16 @@ describe('ToolbarPanel', () => {
     await wrapper.get('select[aria-label="Viewport layout"]').setValue('2x2');
     expect(wrapper.emitted('update:layout')?.[0]).toEqual(['2x2']);
   });
+
+  it('makes Crosshair available only in the MPR layout', () => {
+    const baseProps = { activeTool: 'WindowLevel' as const, invert: false, flipHorizontal: false, flipVertical: false, cineEnabled: false, showSeries: false, showMetadata: false };
+    const stack = mount(ToolbarPanel, { props: { ...baseProps, layout: '1x1' } });
+    const mpr = mount(ToolbarPanel, { props: { ...baseProps, layout: 'mpr' } });
+    const stackCrosshair = stack.findAll('button').find((button) => button.text() === 'Crosshair');
+    const mprCrosshair = mpr.findAll('button').find((button) => button.text() === 'Crosshair');
+
+    expect(stackCrosshair?.attributes('disabled')).toBeDefined();
+    expect(stackCrosshair?.attributes('title')).toBe('Available in MPR layout only');
+    expect(mprCrosshair?.attributes('disabled')).toBeUndefined();
+  });
 });

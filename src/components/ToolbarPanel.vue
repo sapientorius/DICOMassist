@@ -26,10 +26,10 @@ const emit = defineEmits<{
   metadata: [];
 }>();
 
-const tools: Array<{ id: ViewerTool; label: string }> = [
+const tools: Array<{ id: ViewerTool; label: string; mprOnly?: boolean }> = [
   { id: 'WindowLevel', label: 'W/L' }, { id: 'Zoom', label: 'Zoom' }, { id: 'Pan', label: 'Pan' },
   { id: 'Length', label: 'Length' }, { id: 'Angle', label: 'Angle' }, { id: 'EllipticalROI', label: 'ROI' },
-  { id: 'Crosshairs', label: 'Crosshair' }, { id: 'Rotate', label: 'Rotate' },
+  { id: 'Crosshairs', label: 'Crosshair', mprOnly: true }, { id: 'Rotate', label: 'Rotate' },
 ];
 </script>
 
@@ -42,6 +42,8 @@ const tools: Array<{ id: ViewerTool; label: string }> = [
       class="rounded px-2 py-1 text-xs transition-colors"
       :class="activeTool === tool.id ? 'bg-blue-600 text-white' : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100'"
       :aria-pressed="activeTool === tool.id"
+      :disabled="tool.mprOnly && layout !== 'mpr'"
+      :title="tool.mprOnly && layout !== 'mpr' ? 'Available in MPR layout only' : undefined"
       @click="emit('update:activeTool', tool.id)"
     >{{ tool.label }}</button>
     <button class="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100" @click="emit('reset')">Reset</button>

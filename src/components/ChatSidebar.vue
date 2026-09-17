@@ -24,7 +24,7 @@ const emit = defineEmits<{
   cancel: [];
   navigate: [mapping: SliceMapping];
 }>();
-const input = ref<HTMLInputElement | null>(null);
+const input = ref<HTMLTextAreaElement | null>(null);
 const text = ref('');
 const scroll = ref<HTMLDivElement | null>(null);
 const survey = ref(false);
@@ -42,8 +42,15 @@ function send(): void {
   if (!content || busy.value) return;
   if (props.messages.length === 0) emit('start', content); else emit('followUp', content);
   text.value = '';
+  void nextTick(resizeInput);
 }
 function keydown(event: KeyboardEvent): void { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); send(); } }
+function resizeInput(): void {
+  const element = input.value;
+  if (!element) return;
+  element.style.height = 'auto';
+  element.style.height = `${Math.min(element.scrollHeight, 160)}px`;
+}
 function runSurvey(): void { if (selected.value.length) emit('start', buildSurveyHint(bodyPart.value, selected.value), { surveyMode: true }); }
 function focusInput(): void { input.value?.focus(); }
 defineExpose({ focusInput });
@@ -70,6 +77,6 @@ defineExpose({ focusInput });
       <p v-if="busy && statusText" class="text-xs text-blue-300">{{ statusText }}</p>
     </div>
     <p v-if="error" class="mx-3 mb-2 rounded border border-red-800 bg-red-950/30 p-2 text-xs text-red-300" role="alert">{{ error }}</p>
-    <footer class="border-t border-neutral-800 p-3"><p class="mb-1 text-center text-[10px] text-neutral-600">Not for clinical diagnosis</p><div class="flex gap-2 rounded-lg bg-neutral-800 px-3 py-2"><input ref="input" v-model="text" class="min-w-0 flex-1 bg-transparent text-sm text-neutral-100 outline-none placeholder:text-neutral-500" :disabled="busy" :placeholder="messages.length ? 'Ask a follow-up…' : 'Describe clinical context…'" @keydown="keydown"><button class="text-xs font-medium text-blue-300 disabled:opacity-40" :disabled="busy || !text.trim()" @click="send">Send</button></div></footer>
+    <footer class="border-t border-neutral-800 p-3"><p class="mb-1 text-center text-[10px] text-neutral-600">Not for clinical diagnosis</p><div class="flex items-end gap-2 rounded-lg bg-neutral-800 px-3 py-2"><textarea ref="input" v-model="text" rows="2" class="min-h-10 max-h-40 min-w-0 flex-1 resize-none overflow-y-auto bg-transparent text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500" :disabled="busy" :placeholder="messages.length ? 'Ask a follow-up…' : 'Describe clinical context…'" @input="resizeInput" @keydown="keydown"></textarea><button class="text-xs font-medium text-blue-300 disabled:opacity-40" :disabled="busy || !text.trim()" @click="send">Send</button></div></footer>
   </aside>
 </template>

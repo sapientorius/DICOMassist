@@ -101,6 +101,9 @@ watch(currentPlan, async (plan) => {
   viewer.value?.applyPlan(plan);
 });
 watch(status, (value) => { if (value === 'awaiting-confirmation' || (value === 'idle' && messages.value.length > 0)) showChat.value = true; });
+watch(layout, (value) => {
+  if (value !== 'mpr' && activeTool.value === 'Crosshairs') activeTool.value = 'WindowLevel';
+});
 
 function handleKeydown(event: KeyboardEvent): void {
   const modifier = event.metaKey || event.ctrlKey;
