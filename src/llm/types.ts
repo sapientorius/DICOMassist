@@ -1,4 +1,11 @@
 import type { StudyMetadata } from '../dicom/types';
+import type { AnalysisSettings } from './analysisConfig';
+
+export interface DisplayWindow {
+  label: string;
+  windowCenter: number;
+  windowWidth: number;
+}
 
 export interface SeriesSelection {
   seriesNumber: string;
@@ -9,6 +16,10 @@ export interface SeriesSelection {
   samplingParam?: number;
   windowWidth: number;
   windowCenter: number;
+  /** Additional display windows for the same selected slices (mostly CT). */
+  displayWindows?: DisplayWindow[];
+  /** What anatomical coverage this selection is expected to provide. */
+  coverageGoal?: string;
 }
 
 export interface SelectionPlan {
@@ -42,6 +53,33 @@ export interface ProviderProfile {
   textModel?: string;
   /** Call 2 model. It must support image input. */
   visionModel?: string;
+  /** Analysis limits and model context declaration, retained per provider. */
+  analysis?: Partial<AnalysisSettings>;
+}
+
+export interface AdditionalImageRequest {
+  needed: boolean;
+  reason?: string;
+  selections: SeriesSelection[];
+}
+
+export interface FindingEvidence {
+  summary: string;
+  confidence: 'definite' | 'probable' | 'possible' | 'indeterminate';
+  imageIndices: number[];
+}
+
+export interface StructuredAnalysis {
+  summary: string;
+  findings: FindingEvidence[];
+  limitations: string[];
+  additionalImageRequest: AdditionalImageRequest;
+}
+
+export interface AnalysisRequestContext {
+  settings: AnalysisSettings;
+  refinementRound: number;
+  remainingRefinementRounds: number;
 }
 
 /**
@@ -61,7 +99,7 @@ export interface ViewportContext {
 }
 
 export interface LLMService {
-  getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext): Promise<SelectionPlan>;
+  getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext, settings?: AnalysisSettings): Promise<SelectionPlan>;
   analyzeSlices(
     images: Blob[],
     metadata: StudyMetadata,
@@ -69,9 +107,11 @@ export interface LLMService {
     plan: SelectionPlan,
     sliceLabels: string[],
     surveyMode?: boolean,
-  ): Promise<string>;
+    context?: AnalysisRequestContext,
+  ): Promise<StructuredAnalysis>;
   sendFollowUp(
     conversationHistory: ChatMessage[],
     metadata: StudyMetadata,
+    settings?: AnalysisSettings,
   ): Promise<string>;
 }

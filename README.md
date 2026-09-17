@@ -25,7 +25,10 @@ A knee MRI can have 200+ slices across 8+ series. Dumping them all to an AI give
 
 ## Key Features
 
-- **Smart slice filtering** — AI reasons about which series orientation, weighting, and slice range are diagnostically relevant, then samples only those slices
+- **Smart slice filtering** — AI reasons about which series orientation, weighting, coverage goal, and slice range are diagnostically relevant, then samples only those slices
+- **Adaptive image budget** — Fast, Standard, Deep analysis, and custom profiles limit image count, pixel resolution, context, response length, and refinement rounds before a request is sent
+- **Targeted refinement** — The vision model can identify a concrete coverage gap; the planner may supply a bounded, non-duplicate supplementary selection for up to two additional rounds
+- **Evidence-aware output** — Structured findings retain image references, uncertainty, limitations, export settings, and a run comparison log
 - **Multi-series support** — Automatic scout detection, series metadata extraction (orientation, MRI weighting, resolution)
 - **Interactive results** — Clickable slice references in findings jump the viewer to the referenced image
 - **Privacy-first** — DICOM files are processed entirely in your browser. No data is uploaded to any server. Image data is only sent to the LLM provider you configure when you run an analysis
@@ -53,14 +56,15 @@ npm run dev
 1. Click the ⚙ Settings icon in the toolbar
 2. Select a provider and enter its API key when required
 3. Refresh its model catalogue, then choose a **Planning model** and a vision-capable **Vision model**
-4. Load DICOM files, click **Analyze**, and describe what to evaluate
+4. Choose an **Analysis budget** profile. For local models, set the context value to the context actually allocated by your server.
+5. Load DICOM files, click **Analyze**, and describe what to evaluate
 
 Supported providers:
 
 - **Claude API** — enter an API key from [Anthropic](https://console.anthropic.com).
 - **OpenAI** — enter an OpenAI API key and choose models available to your account.
 - **OpenRouter** — enter an OpenRouter API key and select a text model plus an image-capable model from its catalogue.
-- **Ollama** — install [Ollama](https://ollama.ai), run `ollama serve`, pull a model such as `gemma3:4b`, then refresh the local model list.
+- **Ollama** — install [Ollama](https://ollama.ai), run `ollama serve`, pull a model such as `gemma3:4b`, then refresh the local model list. DICOMassist sends the configured context and response budgets as `num_ctx` and `num_predict`; make sure your VRAM allocation can support them.
 - **LM Studio** — start the Developer server, normally at `http://localhost:1234/v1`, load a model, then refresh the local model list. A server token is optional.
 
 The planning model is used for Call 1 and text-only follow-ups. The vision model is used only for Call 2 and must accept image input. API keys are saved only in your browser's localStorage. When using Claude, OpenAI, or OpenRouter, rendered slices and the clinical prompt are sent directly to that selected provider when analysis runs.
@@ -91,9 +95,10 @@ npm run build
 npm run test:e2e
 ```
 
-`test` covers the DICOM geometry helpers, slice selection, LLM-plan guardrails,
-provider requests, and Vue toolbar behavior. `test:e2e` starts the Vite app and
-uses Playwright/Chromium to check the browser landing workflow.
+`test` covers DICOM geometry, slice selection, profile/token guardrails, structured
+LLM responses, targeted-refinement limits, provider requests, and Vue controls.
+`test:e2e` starts the Vite app and uses Playwright/Chromium to check the browser
+landing workflow and analysis-budget settings.
 
 The UI is implemented with Vue single-file components. Framework-neutral DICOM,
 filtering, and LLM modules remain TypeScript modules, while viewer and chat state

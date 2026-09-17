@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { makeStudy } from '../test/fixtures/study';
-import type { SelectionPlan } from './types';
-import { fixSelectionPlan } from './useLLMChat';
+import type { AdditionalImageRequest, SelectionPlan } from './types';
+import { canRunRefinement, fixSelectionPlan } from './useLLMChat';
 
 function plan(overrides: Partial<SelectionPlan> = {}): SelectionPlan {
   return {
@@ -25,5 +25,25 @@ describe('fixSelectionPlan', () => {
 
   it('rejects plans that reference no locally available series', () => {
     expect(() => fixSelectionPlan(plan({ selections: [{ ...plan().selections[0], seriesNumber: '404' }] }), makeStudy())).toThrow('valid series');
+  });
+
+  it('accounts for alternate display windows inside the configured image budget', () => {
+    const fixed = fixSelectionPlan(plan({
+      selections: [{
+        ...plan().selections[0], sliceRange: [1, 30], samplingStrategy: 'all',
+        displayWindows: [{ label: 'Lung', windowCenter: -600, windowWidth: 1500 }],
+      }],
+    }), makeStudy(), 6);
+    expect(fixed.totalImages).toBeLessThanOrEqual(6);
+    expect(fixed.selections[0].samplingParam).toBe(3);
+    expect(fixed.selections[0].displayWindows).toHaveLength(1);
+  });
+
+  it('permits at most the configured number of targeted refinement rounds', () => {
+    const request: AdditionalImageRequest = { needed: true, selections: [{ ...plan().selections[0], sliceRange: [10, 12] }] };
+    expect(canRunRefinement(request, 0, 2, 4)).toBe(true);
+    expect(canRunRefinement(request, 1, 2, 4)).toBe(true);
+    expect(canRunRefinement(request, 2, 2, 4)).toBe(false);
+    expect(canRunRefinement(request, 0, 2, 0)).toBe(false);
   });
 });

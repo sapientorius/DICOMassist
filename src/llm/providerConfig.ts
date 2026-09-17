@@ -1,4 +1,6 @@
 import type { ProviderConfig, ProviderProfile, ProviderType } from './types';
+import type { AnalysisSettings } from './analysisConfig';
+import { getProviderAnalysisSettings } from './analysisConfig';
 
 export const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 export const DEFAULT_LM_STUDIO_URL = 'http://localhost:1234/v1';
@@ -41,6 +43,13 @@ export function getProviderProfile(
     ...DEFAULT_PROFILES[provider],
     ...config.profiles[provider],
   };
+}
+
+export function getProviderAnalysisConfig(
+  config: ProviderConfig,
+  provider = config.provider,
+): AnalysisSettings {
+  return getProviderAnalysisSettings(provider, getProviderProfile(config, provider).analysis);
 }
 
 export function updateProviderProfile(
@@ -90,6 +99,9 @@ export function migrateProviderConfig(value: unknown): ProviderConfig {
         baseUrl: asNonEmptyString(source.baseUrl),
         textModel: asNonEmptyString(source.textModel),
         visionModel: asNonEmptyString(source.visionModel),
+        analysis: source.analysis && typeof source.analysis === 'object'
+          ? source.analysis as Partial<AnalysisSettings>
+          : undefined,
       };
     }
     return { provider, profiles };

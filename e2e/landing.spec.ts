@@ -20,5 +20,9 @@ test('loads the bundled sample into the Vue viewer and opens analysis chat', asy
   await expect(page.getByRole('button', { name: 'Analyze' })).toBeVisible({ timeout: 60_000 });
   await page.getByRole('button', { name: 'Analyze' }).click();
   await expect(page.getByRole('heading', { name: 'Analysis chat' })).toBeVisible();
+  await page.getByLabel('Open settings').click();
+  await page.getByRole('button', { name: 'Deep analysis' }).click();
+  await expect(page.getByLabel('Max images')).toHaveValue('32');
+  await expect(page.getByLabel('Refinement rounds')).toHaveValue('2');
   expect(runtimeErrors).toEqual([]);
 });

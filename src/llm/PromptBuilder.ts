@@ -1,5 +1,6 @@
 import type { StudyMetadata, SeriesMetadata } from '../dicom/types';
 import type { SelectionPlan, ViewportContext } from './types';
+import type { AnalysisSettings } from './analysisConfig';
 
 const DISCLAIMER =
   'IMPORTANT: This is a research/portfolio tool, NOT for clinical diagnosis. ' +
@@ -69,7 +70,8 @@ function formatMetadataSummary(metadata: StudyMetadata): string {
   return lines.join('\n');
 }
 
-export function buildSelectionSystemPrompt(): string {
+export function buildSelectionSystemPrompt(settings?: AnalysisSettings): string {
+  const imageBudget = settings?.maxImages ?? 20;
   return [
     'You are a medical imaging AI assistant that helps select the most relevant DICOM slices for clinical analysis.',
     DISCLAIMER,
@@ -119,17 +121,18 @@ export function buildSelectionSystemPrompt(): string {
     '- For axial views: Select the range covering the anatomical region of interest',
     '- For spine sagittal: Select slices centered on the relevant vertebral levels',
     '',
-    'A focused range of 10-15 slices through the relevant anatomy is BETTER than',
-    '40 slices covering the entire field of view. The vision model analyzes each',
-    'image — sending irrelevant slices dilutes the analysis quality.',
+    'Use a two-part strategy: first keep enough evenly spaced overview slices to prove',
+    'anatomical coverage; then assign denser focal slices only where the clinical',
+    'question or a referenced current view warrants detail. The vision model analyzes',
+    'each image — sending irrelevant slices dilutes the analysis quality.',
     '',
     'If you\'re unsure of the exact range, select the middle 50-70% of the series',
     'rather than the full range.',
     '',
     '## OUTPUT CONSTRAINTS (MANDATORY)',
     '',
-    '- You may select 1 PRIMARY series (8-12 slices) and 0-2 SUPPLEMENTARY series (3-5 slices each)',
-    '- The total across ALL series MUST be ≤ 20 slices',
+    '- You may select 1 PRIMARY series and 0-2 SUPPLEMENTARY series',
+    `- The total rendered images across ALL series and display windows MUST be ≤ ${imageBudget}`,
     '- If a range contains more slices than the budget, use a sampling strategy to reduce',
     '- The samplingParam in "uniform" mode means "select exactly this many slices',
     '  evenly spaced across the range"',
@@ -137,6 +140,8 @@ export function buildSelectionSystemPrompt(): string {
     '- Scout / localizer series (very few slices, large spacing) should NEVER be selected',
     '- Only add supplementary series when they provide genuinely different diagnostic',
     '  information (different plane, different weighting, different phase)',
+    '- For CT, you may add a second display window only when it adds distinct information',
+    '  (for example soft tissue plus lung or bone). Count each windowed rendering in the total budget.',
     '',
     '## Output Format',
     '',
@@ -151,7 +156,9 @@ export function buildSelectionSystemPrompt(): string {
     '    - samplingParam: number — for "uniform": exact count. For "every_nth": step size. Omit for "all".',
     '    - windowCenter: number',
     '    - windowWidth: number',
-    '- totalImages: number — sum of all slices across selections (must be ≤ 20)',
+    '    - coverageGoal: string — anatomy or diagnostic uncertainty this selection covers',
+    '    - displayWindows: array of additional {label, windowCenter, windowWidth} renderings (use [] when none)',
+    `- totalImages: number — sum of all rendered slices/windows (must be ≤ ${imageBudget})`,
     '',
     'The first element in selections MUST be the primary series (role: "primary").',
     'Output ONLY the JSON object, no other text.',
@@ -190,7 +197,7 @@ export function buildSelectionUserPrompt(metadata: StudyMetadata, clinicalHint: 
   return lines.join('\n');
 }
 
-function buildStandardResponseFormat(): string[] {
+export function buildStandardResponseFormat(): string[] {
   return [
     '## RESPONSE FORMAT',
     '',
@@ -228,7 +235,7 @@ function buildStandardResponseFormat(): string[] {
   ];
 }
 
-function buildSurveyResponseFormat(): string[] {
+export function buildSurveyResponseFormat(): string[] {
   return [
     '## RESPONSE FORMAT',
     '',
@@ -274,7 +281,10 @@ function buildSurveyResponseFormat(): string[] {
   ];
 }
 
-export function buildAnalysisSystemPrompt(surveyMode?: boolean): string {
+export function buildAnalysisSystemPrompt(
+  surveyMode?: boolean,
+  refinement?: { round: number; remainingRounds: number },
+): string {
   return [
     'You are a medical imaging AI assistant analyzing DICOM images.',
     DISCLAIMER,
@@ -317,7 +327,26 @@ export function buildAnalysisSystemPrompt(surveyMode?: boolean): string {
     '   making a definitive call. False confidence is worse than admitted',
     '   uncertainty.',
     '',
-    ...(surveyMode ? buildSurveyResponseFormat() : buildStandardResponseFormat()),
+    ...(surveyMode ? [
+      'Perform the requested structure-by-structure survey, but only for structures',
+      'that are actually visible in the supplied images.',
+    ] : []),
+    '',
+    '## OUTPUT FORMAT (MANDATORY)',
+    'Return ONLY a JSON object with these fields:',
+    '- summary: string',
+    '- findings: array of {summary, confidence: "definite"|"probable"|"possible"|"indeterminate", imageIndices: number[]}',
+    '- limitations: string[]',
+    '- additionalImageRequest: {needed: boolean, reason: string, selections: []}',
+    'Each additionalImageRequest selection must contain seriesNumber, role, rationale,',
+    'sliceRange [start,end], samplingStrategy, samplingParam, windowCenter, windowWidth,',
+    'and coverageGoal. Set needed=true only for a specific visual blind spot that',
+    'additional slices or a different series could resolve.',
+    refinement
+      ? refinement.remainingRounds > 0
+        ? `This is refinement round ${refinement.round}. At most ${refinement.remainingRounds} additional round(s) remain; request only the minimum targeted images needed.`
+        : 'No additional image rounds remain. Set additionalImageRequest.needed=false.'
+      : 'Request additional images only when a specific visual blind spot remains.',
   ].join('\n');
 }
 

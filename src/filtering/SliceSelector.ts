@@ -31,10 +31,26 @@ interface SamplingParams {
 export function selectSlicesForSelection(
   metadata: StudyMetadata,
   selection: SeriesSelection,
+  maxSlices = MAX_SLICES,
 ): SelectedSlice[] {
   const series = metadata.series.find((s) => String(s.seriesNumber) === selection.seriesNumber);
   if (!series) return [];
-  return selectFromSeries(series, selection);
+  return selectFromSeries(series, selection, maxSlices);
+}
+
+/** Low-resolution samples across a complete series, used only to build a spatial overview montage. */
+export function selectOverviewSlices(
+  metadata: StudyMetadata,
+  seriesNumber: string,
+  count = 8,
+): SelectedSlice[] {
+  const series = metadata.series.find((candidate) => String(candidate.seriesNumber) === seriesNumber);
+  if (!series) return [];
+  return selectFromSeries(series, {
+    sliceRange: series.instanceNumberRange,
+    samplingStrategy: 'uniform',
+    samplingParam: Math.max(1, count),
+  }, Math.max(1, count));
 }
 
 /**
@@ -53,6 +69,7 @@ export function selectSlices(metadata: StudyMetadata, plan: SelectionPlan): Sele
 function selectFromSeries(
   series: SeriesMetadata,
   params: SamplingParams,
+  maxSlices = MAX_SLICES,
 ): SelectedSlice[] {
   const [rangeStart, rangeEnd] = params.sliceRange;
   const axisIdx = varyingAxisIndex(series.anatomicalPlane);
@@ -64,7 +81,7 @@ function selectFromSeries(
   const slicesToSample = inRange.length === 0 ? [...series.slices] : inRange;
   slicesToSample.sort((a, b) => a.instanceNumber - b.instanceNumber);
 
-  return applyStrategy(slicesToSample, params, axisIdx);
+  return applyStrategy(slicesToSample, params, axisIdx, maxSlices);
 }
 
 function applyStrategy(

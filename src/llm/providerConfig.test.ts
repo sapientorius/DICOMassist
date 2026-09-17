@@ -21,6 +21,13 @@ const selectionPlanJson = JSON.stringify({
   reasoning: 'test',
 });
 
+const structuredAnalysisJson = JSON.stringify({
+  summary: 'analysis',
+  findings: [{ summary: 'finding', confidence: 'probable', imageIndices: [1] }],
+  limitations: ['sampled images'],
+  additionalImageRequest: { needed: false, reason: '', selections: [] },
+});
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -87,14 +94,16 @@ describe('OpenAI-compatible provider requests', () => {
   it('uses the configured text and vision models for each pipeline call', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: selectionPlanJson } }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: 'analysis' } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: structuredAnalysisJson } }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: 'follow-up' } }] }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
     const service = createLLMService(config);
     const plan = await service.getSelectionPlan(metadata, 'look for a finding');
     expect(plan).toMatchObject({ targetSeries: '1' });
-    await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toBe('analysis');
+    await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toMatchObject({
+      summary: 'analysis', findings: [{ confidence: 'probable', imageIndices: [1] }],
+    });
     await expect(service.sendFollowUp([{ id: '1', role: 'user', content: 'Explain more', timestamp: 1 }], metadata)).resolves.toBe('follow-up');
 
     const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
@@ -115,6 +124,27 @@ describe('OpenAI-compatible provider requests', () => {
   });
 });
 
+describe('Ollama request budgets', () => {
+  it('passes the configured context and response budget to local inference', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: selectionPlanJson } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: structuredAnalysisJson } }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const service = createLLMService({
+      provider: 'ollama',
+      profiles: { ollama: { textModel: 'planner', visionModel: 'vision' } },
+    });
+    const settings = { profile: 'custom' as const, maxImages: 12, maxImagePixels: 786_432, maxRefinementRounds: 1, contextWindowTokens: 32_768, responseTokenBudget: 3_072 };
+    const plan = await service.getSelectionPlan(metadata, 'look for a finding', undefined, settings);
+    await service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'], false, { settings, refinementRound: 0, remainingRefinementRounds: 1 });
+
+    for (const [, request] of fetchMock.mock.calls) {
+      const body = JSON.parse(request.body as string);
+      expect(body.options).toMatchObject({ num_ctx: 32_768, num_predict: 3_072, temperature: 0 });
+    }
+  });
+});
+
 describe('Claude provider requests', () => {
   const claudeConfig: ProviderConfig = {
     provider: 'claude',
@@ -126,13 +156,15 @@ describe('Claude provider requests', () => {
   it('omits temperature for Sonnet 5 planning, vision, and follow-up requests', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: selectionPlanJson }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: 'analysis' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: structuredAnalysisJson }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: 'follow-up' }] }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
     const service = createLLMService(claudeConfig);
     const plan = await service.getSelectionPlan(metadata, 'look for a finding');
-    await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toBe('analysis');
+    await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toMatchObject({
+      summary: 'analysis', findings: [{ confidence: 'probable', imageIndices: [1] }],
+    });
     await expect(service.sendFollowUp([{ id: '1', role: 'user', content: 'Explain more', timestamp: 1 }], metadata)).resolves.toBe('follow-up');
 
     const planningBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
@@ -155,7 +187,7 @@ describe('Claude provider requests', () => {
                   additionalProperties: false,
                   required: [
                     'seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy',
-                    'samplingParam', 'windowCenter', 'windowWidth',
+                    'samplingParam', 'windowCenter', 'windowWidth', 'coverageGoal', 'displayWindows',
                   ],
                 },
               },
@@ -167,7 +199,10 @@ describe('Claude provider requests', () => {
     expect(planningBody.output_config.format.schema.properties.selections.items.properties.samplingParam).toEqual({
       anyOf: [{ type: 'number' }, { type: 'null' }],
     });
-    expect(analysisBody).not.toHaveProperty('output_config');
+    expect(analysisBody.output_config.format.schema).toMatchObject({
+      required: ['summary', 'findings', 'limitations', 'additionalImageRequest'],
+      additionalProperties: false,
+    });
     expect(analysisBody).not.toHaveProperty('thinking');
     expect(followUpBody).not.toHaveProperty('output_config');
     expect(followUpBody).not.toHaveProperty('thinking');

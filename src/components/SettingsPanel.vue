@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import type { ProviderConfig, ProviderProfile, ProviderType } from '../llm/types';
-import { DEFAULT_LM_STUDIO_URL, DEFAULT_OLLAMA_URL, getProviderProfile, PROVIDER_LABELS, updateProviderProfile } from '../llm/providerConfig';
+import type { AnalysisProfileId, AnalysisSettings } from '../llm/analysisConfig';
+import { describeAnalysisProfile, getAnalysisProfileDefaults, normaliseAnalysisSettings } from '../llm/analysisConfig';
+import { DEFAULT_LM_STUDIO_URL, DEFAULT_OLLAMA_URL, getProviderAnalysisConfig, getProviderProfile, PROVIDER_LABELS, updateProviderProfile } from '../llm/providerConfig';
 import { fetchProviderModels, type ProviderModelInfo } from '../llm/LLMServiceFactory';
 
 const props = defineProps<{ open: boolean; config: ProviderConfig }>();
@@ -11,12 +13,20 @@ const catalogError = ref<string | null>(null);
 const loading = ref(false);
 const provider = computed(() => props.config.provider);
 const profile = computed(() => getProviderProfile(props.config));
+const analysis = computed(() => getProviderAnalysisConfig(props.config));
 const remote = computed(() => ['claude', 'openrouter', 'openai'].includes(provider.value));
 const providers: ProviderType[] = ['claude', 'ollama', 'lmstudio', 'openrouter', 'openai'];
 
 watch(() => props.open, (open) => { if (!open) { models.value = []; catalogError.value = null; } });
 function choose(next: ProviderType): void { emit('change', { ...props.config, provider: next }); }
 function update(update: Partial<ProviderProfile>): void { emit('change', updateProviderProfile(props.config, provider.value, update)); }
+function updateAnalysis(change: Partial<AnalysisSettings>, keepPreset = false): void {
+  const next = normaliseAnalysisSettings({ ...analysis.value, ...change, profile: keepPreset ? change.profile ?? analysis.value.profile : 'custom' });
+  update({ analysis: next });
+}
+function chooseProfile(next: AnalysisProfileId): void {
+  update({ analysis: next === 'custom' ? { ...analysis.value, profile: 'custom' } : getAnalysisProfileDefaults(next) });
+}
 async function refresh(): Promise<void> {
   loading.value = true; catalogError.value = null;
   try { models.value = (await fetchProviderModels(provider.value, profile.value)).sort((left, right) => left.label.localeCompare(right.label)); }
@@ -37,6 +47,18 @@ async function refresh(): Promise<void> {
         <div class="border-t border-neutral-700 pt-3"><div class="flex items-center justify-between"><p class="text-xs text-neutral-400">Available models</p><button class="rounded bg-neutral-700 px-2 py-1 text-xs text-neutral-200 disabled:opacity-50" :disabled="loading" @click="refresh">{{ loading ? 'Loading…' : 'Refresh' }}</button></div><p v-if="catalogError" class="mt-2 text-xs text-red-300">{{ catalogError }}</p></div>
         <label class="block text-xs text-neutral-400">Planning model<input list="planning-models" :value="profile.textModel ?? ''" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-2 text-sm text-neutral-100" @input="update({ textModel: ($event.target as HTMLInputElement).value })"><datalist id="planning-models"><option v-for="model in models" :key="model.id" :value="model.id">{{ model.label }}</option></datalist></label>
         <label class="block text-xs text-neutral-400">Vision model<input list="vision-models" :value="profile.visionModel ?? ''" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-2 text-sm text-neutral-100" @input="update({ visionModel: ($event.target as HTMLInputElement).value })"><datalist id="vision-models"><option v-for="model in models.filter((model) => model.supportsVision !== false)" :key="model.id" :value="model.id">{{ model.label }}</option></datalist></label>
+        <fieldset class="space-y-2 border-t border-neutral-700 pt-3">
+          <legend class="text-xs text-neutral-300">Analysis budget</legend>
+          <div class="grid grid-cols-2 gap-1"><button v-for="candidate in (['fast', 'standard', 'deep', 'custom'] as AnalysisProfileId[])" :key="candidate" class="rounded px-2 py-1.5 text-[11px]" :class="analysis.profile === candidate ? 'bg-blue-600 text-white' : 'bg-neutral-900 text-neutral-400'" @click="chooseProfile(candidate)">{{ describeAnalysisProfile(candidate) }}</button></div>
+          <div class="grid grid-cols-2 gap-2 text-[11px]">
+            <label class="text-neutral-400">Max images<input type="number" min="1" max="40" :value="analysis.maxImages" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-1.5 text-neutral-100" @input="updateAnalysis({ maxImages: Number(($event.target as HTMLInputElement).value) })"></label>
+            <label class="text-neutral-400">Image megapixels<input type="number" min="0.07" max="1.15" step="0.01" :value="(analysis.maxImagePixels / 1_000_000).toFixed(2)" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-1.5 text-neutral-100" @input="updateAnalysis({ maxImagePixels: Number(($event.target as HTMLInputElement).value) * 1_000_000 })"></label>
+            <label class="text-neutral-400">Context (tokens)<input type="number" min="4096" max="1000000" step="1024" :value="analysis.contextWindowTokens" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-1.5 text-neutral-100" @input="updateAnalysis({ contextWindowTokens: Number(($event.target as HTMLInputElement).value) })"></label>
+            <label class="text-neutral-400">Response (tokens)<input type="number" min="512" max="16384" step="512" :value="analysis.responseTokenBudget" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-1.5 text-neutral-100" @input="updateAnalysis({ responseTokenBudget: Number(($event.target as HTMLInputElement).value) })"></label>
+            <label class="text-neutral-400">Refinement rounds<input type="number" min="0" max="2" :value="analysis.maxRefinementRounds" class="mt-1 w-full rounded border border-neutral-700 bg-neutral-900 p-1.5 text-neutral-100" @input="updateAnalysis({ maxRefinementRounds: Number(($event.target as HTMLInputElement).value) })"></label>
+          </div>
+          <p class="text-[10px] text-neutral-500">The context setting must match the capacity allocated by the selected local server. Image count includes alternate CT windows and refinement images.</p>
+        </fieldset>
       </div>
     </section>
   </div>

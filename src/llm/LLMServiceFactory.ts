@@ -1,5 +1,7 @@
 import type { StudyMetadata } from '../dicom/types';
-import type { SelectionPlan, SeriesSelection, ChatMessage, ProviderConfig, ProviderProfile, ProviderType, LLMService, ViewportContext } from './types';
+import type { SelectionPlan, SeriesSelection, ChatMessage, ProviderConfig, ProviderProfile, ProviderType, LLMService, ViewportContext, StructuredAnalysis, AnalysisRequestContext, DisplayWindow } from './types';
+import type { AnalysisSettings } from './analysisConfig';
+import { parseStructuredAnalysis } from './analysisResults';
 import { DEFAULT_LM_STUDIO_URL, DEFAULT_OLLAMA_URL, getProviderProfile, PROVIDER_LABELS } from './providerConfig';
 import {
   buildSelectionSystemPrompt,
@@ -64,10 +66,22 @@ const SELECTION_PLAN_OUTPUT_SCHEMA: Record<string, unknown> = {
           samplingParam: { anyOf: [{ type: 'number' }, { type: 'null' }] },
           windowCenter: { type: 'number' },
           windowWidth: { type: 'number' },
+          coverageGoal: { type: 'string' },
+          displayWindows: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string' }, windowCenter: { type: 'number' }, windowWidth: { type: 'number' },
+              },
+              required: ['label', 'windowCenter', 'windowWidth'],
+              additionalProperties: false,
+            },
+          },
         },
         required: [
           'seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy',
-          'samplingParam', 'windowCenter', 'windowWidth',
+          'samplingParam', 'windowCenter', 'windowWidth', 'coverageGoal', 'displayWindows',
         ],
         additionalProperties: false,
       },
@@ -75,6 +89,51 @@ const SELECTION_PLAN_OUTPUT_SCHEMA: Record<string, unknown> = {
     totalImages: { type: 'number' },
   },
   required: ['reasoning', 'selections', 'totalImages'],
+  additionalProperties: false,
+};
+
+const ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          confidence: { type: 'string', enum: ['definite', 'probable', 'possible', 'indeterminate'] },
+          imageIndices: { type: 'array', items: { type: 'number' } },
+        },
+        required: ['summary', 'confidence', 'imageIndices'],
+        additionalProperties: false,
+      },
+    },
+    limitations: { type: 'array', items: { type: 'string' } },
+    additionalImageRequest: {
+      type: 'object',
+      properties: {
+        needed: { type: 'boolean' },
+        reason: { type: 'string' },
+        selections: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              seriesNumber: { type: 'string' }, role: { type: 'string', enum: ['primary', 'supplementary'] }, rationale: { type: 'string' },
+              sliceRange: { type: 'array', items: { type: 'number' } }, samplingStrategy: { type: 'string', enum: ['uniform', 'every_nth', 'all'] },
+              samplingParam: { anyOf: [{ type: 'number' }, { type: 'null' }] }, windowCenter: { type: 'number' }, windowWidth: { type: 'number' }, coverageGoal: { type: 'string' },
+            },
+            required: ['seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy', 'samplingParam', 'windowCenter', 'windowWidth', 'coverageGoal'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['needed', 'reason', 'selections'],
+      additionalProperties: false,
+    },
+  },
+  required: ['summary', 'findings', 'limitations', 'additionalImageRequest'],
   additionalProperties: false,
 };
 
@@ -98,6 +157,17 @@ async function blobToBase64(blob: Blob): Promise<string> {
 }
 
 function parseSeriesSelection(raw: Record<string, unknown>): SeriesSelection {
+  const displayWindows = Array.isArray(raw.displayWindows)
+    ? raw.displayWindows.map((window): DisplayWindow | null => {
+      if (!window || typeof window !== 'object') return null;
+      const value = window as Record<string, unknown>;
+      const windowCenter = Number(value.windowCenter);
+      const windowWidth = Number(value.windowWidth);
+      return Number.isFinite(windowCenter) && Number.isFinite(windowWidth) && windowWidth > 0
+        ? { label: String(value.label ?? 'Additional window'), windowCenter, windowWidth }
+        : null;
+    }).filter((window): window is DisplayWindow => window !== null)
+    : [];
   return {
     seriesNumber: String(raw.seriesNumber),
     role: raw.role === 'supplementary' ? 'supplementary' : 'primary',
@@ -107,6 +177,8 @@ function parseSeriesSelection(raw: Record<string, unknown>): SeriesSelection {
     samplingParam: raw.samplingParam != null ? Number(raw.samplingParam) : undefined,
     windowWidth: Number(raw.windowWidth),
     windowCenter: Number(raw.windowCenter),
+    coverageGoal: String(raw.coverageGoal ?? ''),
+    displayWindows,
   };
 }
 
@@ -238,9 +310,9 @@ class ClaudeService implements LLMService {
     this.visionModel = visionModel;
   }
 
-  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext): Promise<SelectionPlan> {
+  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext, settings?: AnalysisSettings): Promise<SelectionPlan> {
     const params: ClaudeCallParams = {
-      system: buildSelectionSystemPrompt(),
+      system: buildSelectionSystemPrompt(settings),
       messages: [{ role: 'user', content: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext) }],
       maxTokens: 4096,
       outputSchema: SELECTION_PLAN_OUTPUT_SCHEMA,
@@ -276,8 +348,8 @@ class ClaudeService implements LLMService {
   }
 
   async analyzeSlices(
-    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean,
-  ): Promise<string> {
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean, context?: AnalysisRequestContext,
+  ): Promise<StructuredAnalysis> {
     const imageContents = await Promise.all(images.map(async (blob, index) => [
       {
         type: 'image' as const,
@@ -285,21 +357,23 @@ class ClaudeService implements LLMService {
       },
       { type: 'text' as const, text: sliceLabels[index] ?? `Image ${index + 1}` },
     ]));
-    return (await this.callClaude(this.visionModel, {
-      system: buildAnalysisSystemPrompt(surveyMode),
+    const response = await this.callClaude(this.visionModel, {
+      system: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined),
       messages: [{
         role: 'user',
         content: [...imageContents.flat(), { type: 'text' as const, text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels) }],
       }],
-      maxTokens: 4096,
-    })).text;
+      maxTokens: context?.settings.responseTokenBudget ?? 4096,
+      outputSchema: ANALYSIS_OUTPUT_SCHEMA,
+    });
+    return parseStructuredAnalysis(response.text);
   }
 
-  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata): Promise<string> {
+  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {
     return (await this.callClaude(this.textModel, {
       system: `${buildFollowUpSystemPrompt()}\n\nStudy context: ${metadata.studyDescription}`,
       messages: conversationHistory.map((message) => ({ role: message.role, content: message.content })),
-      maxTokens: 4096,
+      maxTokens: settings?.responseTokenBudget ?? 4096,
     })).text;
   }
 
@@ -379,36 +453,36 @@ class OllamaService implements LLMService {
     this.baseUrl = baseUrl;
   }
 
-  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext): Promise<SelectionPlan> {
+  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext, settings?: AnalysisSettings): Promise<SelectionPlan> {
     const response = await this.callOllama({
-      model: this.textModel, system: buildSelectionSystemPrompt(), userContent: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext),
+      model: this.textModel, system: buildSelectionSystemPrompt(settings), userContent: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext), settings,
     });
     return parseSelectionPlan(response);
   }
 
   async analyzeSlices(
-    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean,
-  ): Promise<string> {
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean, context?: AnalysisRequestContext,
+  ): Promise<StructuredAnalysis> {
     const base64Images = await Promise.all(images.map(blobToBase64));
     const manifest = sliceLabels.map((label, index) => `  ${index + 1}. ${label}`).join('\n');
     return this.callOllama({
-      model: this.visionModel, system: buildAnalysisSystemPrompt(surveyMode), images: base64Images,
+      model: this.visionModel, system: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined), images: base64Images, settings: context?.settings,
       userContent: `IMAGE MANIFEST (${sliceLabels.length} images, in sequential order):\n${manifest}\n\nThe images are provided in the exact order listed above.\n\n${buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels)}`,
-    });
+    }).then(parseStructuredAnalysis);
   }
 
-  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata): Promise<string> {
+  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {
     return this.callOllama({
       model: this.textModel, system: '', userContent: '',
       messages: [
         { role: 'system', content: `${buildFollowUpSystemPrompt()}\n\nStudy context: ${metadata.studyDescription}` },
         ...conversationHistory.map((message) => ({ role: message.role, content: message.content })),
-      ],
+      ], settings,
     });
   }
 
   private async callOllama(params: {
-    model: string; system: string; userContent: string; images?: string[]; messages?: Array<{ role: string; content: string }>;
+    model: string; system: string; userContent: string; images?: string[]; messages?: Array<{ role: string; content: string }>; settings?: AnalysisSettings;
   }): Promise<string> {
     const messages = params.messages ?? [
       { role: 'system', content: params.system },
@@ -418,7 +492,10 @@ class OllamaService implements LLMService {
     try {
       response = await fetch(`${normaliseApiBase(this.baseUrl)}/api/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: params.model, messages, stream: false, options: { temperature: 0 } }), signal: AbortSignal.timeout(300_000),
+        body: JSON.stringify({ model: params.model, messages, stream: false, options: {
+          temperature: 0,
+          ...(params.settings ? { num_ctx: params.settings.contextWindowTokens, num_predict: params.settings.responseTokenBudget } : {}),
+        } }), signal: AbortSignal.timeout(300_000),
       });
     } catch (error) {
       throw connectionError(error, PROVIDER_LABELS.ollama);
@@ -452,17 +529,17 @@ class OpenAICompatibleService implements LLMService {
     this.apiKey = apiKey;
   }
 
-  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext): Promise<SelectionPlan> {
+  async getSelectionPlan(metadata: StudyMetadata, clinicalHint: string, viewportContext?: ViewportContext, settings?: AnalysisSettings): Promise<SelectionPlan> {
     const response = await this.callChat(this.textModel, [
-      { role: 'system', content: buildSelectionSystemPrompt() },
+      { role: 'system', content: buildSelectionSystemPrompt(settings) },
       { role: 'user', content: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext) },
-    ], 1024);
+    ], Math.min(settings?.responseTokenBudget ?? 1024, 4096));
     return parseSelectionPlan(response);
   }
 
   async analyzeSlices(
-    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean,
-  ): Promise<string> {
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], surveyMode?: boolean, context?: AnalysisRequestContext,
+  ): Promise<StructuredAnalysis> {
     const content: Array<Record<string, unknown>> = [];
     for (let index = 0; index < images.length; index++) {
       content.push(
@@ -472,16 +549,16 @@ class OpenAICompatibleService implements LLMService {
     }
     content.push({ type: 'text', text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels) });
     return this.callChat(this.visionModel, [
-      { role: 'system', content: buildAnalysisSystemPrompt(surveyMode) },
+      { role: 'system', content: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined) },
       { role: 'user', content },
-    ], 4096);
+    ], context?.settings.responseTokenBudget ?? 4096).then(parseStructuredAnalysis);
   }
 
-  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata): Promise<string> {
+  async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {
     return this.callChat(this.textModel, [
       { role: 'system', content: `${buildFollowUpSystemPrompt()}\n\nStudy context: ${metadata.studyDescription}` },
       ...conversationHistory.map((message) => ({ role: message.role, content: message.content })),
-    ], 4096);
+    ], settings?.responseTokenBudget ?? 4096);
   }
 
   private async callChat(model: string, messages: ChatMessagePayload[], maxTokens: number): Promise<string> {

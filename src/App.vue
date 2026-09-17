@@ -85,6 +85,7 @@ function startWithContext(hint: string, options?: { surveyMode?: boolean }): voi
   void startAnalysis(hint, context, options);
 }
 async function navigate(mapping: SliceMapping): Promise<void> {
+  if (mapping.kind !== 'slice' || mapping.instanceNumber == null) return;
   const series = studyMetadata.value?.series.find((candidate) => String(candidate.seriesNumber) === mapping.seriesNumber);
   if (!series) return;
   if (series.seriesInstanceUID !== activeSeriesUID.value) selectSeries(series.seriesInstanceUID);
