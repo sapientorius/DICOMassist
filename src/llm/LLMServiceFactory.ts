@@ -237,7 +237,13 @@ class ClaudeService implements LLMService {
           'Content-Type': 'application/json', 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },
-        body: JSON.stringify({ model, max_tokens: params.maxTokens, temperature: 0, system: params.system, messages: params.messages }),
+        body: JSON.stringify({
+          model,
+          max_tokens: params.maxTokens,
+          ...(this.shouldOmitTemperature(model) ? {} : { temperature: 0 }),
+          system: params.system,
+          messages: params.messages,
+        }),
         signal: AbortSignal.timeout(300_000),
       });
     } catch (error) {
@@ -246,6 +252,22 @@ class ClaudeService implements LLMService {
     if (!response.ok) throw await responseError(response, PROVIDER_LABELS.claude);
     const data = await response.json() as { content?: Array<{ type?: string; text?: string }> };
     return data.content?.find((block) => block.type === 'text')?.text ?? '';
+  }
+
+  /**
+   * Newer Claude models reject non-default temperature values. Keep the
+   * deterministic setting for older models that still support it.
+   */
+  private shouldOmitTemperature(model: string): boolean {
+    const match = /^claude-(sonnet|opus)-(\d+)(?:-(\d+))?(?:-|$)/i.exec(model.trim());
+    if (!match) return false;
+
+    const [, family, majorText, minorText] = match;
+    const major = Number(majorText);
+    const minor = Number(minorText ?? 0);
+
+    if (family.toLowerCase() === 'sonnet') return major >= 5;
+    return major > 4 || (major === 4 && minor >= 7);
   }
 }
 

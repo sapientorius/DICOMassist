@@ -114,3 +114,72 @@ describe('OpenAI-compatible provider requests', () => {
     })).toThrow('Select a vision model for OpenAI');
   });
 });
+
+describe('Claude provider requests', () => {
+  const claudeConfig: ProviderConfig = {
+    provider: 'claude',
+    profiles: {
+      claude: { apiKey: 'claude-key', textModel: 'claude-sonnet-5', visionModel: 'claude-sonnet-5-20260901' },
+    },
+  };
+
+  it('omits temperature for Sonnet 5 planning, vision, and follow-up requests', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: selectionPlanJson }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: 'analysis' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: 'follow-up' }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const service = createLLMService(claudeConfig);
+    const plan = await service.getSelectionPlan(metadata, 'look for a finding');
+    await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toBe('analysis');
+    await expect(service.sendFollowUp([{ id: '1', role: 'user', content: 'Explain more', timestamp: 1 }], metadata)).resolves.toBe('follow-up');
+
+    for (const [, request] of fetchMock.mock.calls) {
+      const body = JSON.parse(request.body as string);
+      expect(body).not.toHaveProperty('temperature');
+    }
+  });
+
+  it('retains temperature for older Claude models', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ content: [{ type: 'text', text: selectionPlanJson }] }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const service = createLLMService({
+      provider: 'claude',
+      profiles: {
+        claude: {
+          apiKey: 'claude-key',
+          textModel: 'claude-sonnet-4-5-20250929',
+          visionModel: 'claude-sonnet-4-5-20250929',
+        },
+      },
+    });
+    await service.getSelectionPlan(metadata, 'look for a finding');
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.temperature).toBe(0);
+  });
+
+  it('omits temperature for Claude Opus 4.7 and newer', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: selectionPlanJson }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ content: [{ type: 'text', text: selectionPlanJson }] }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    for (const model of ['claude-opus-4-7-20260416', 'claude-opus-5']) {
+      const service = createLLMService({
+        provider: 'claude',
+        profiles: { claude: { apiKey: 'claude-key', textModel: model, visionModel: model } },
+      });
+      await service.getSelectionPlan(metadata, 'look for a finding');
+    }
+
+    for (const [, request] of fetchMock.mock.calls) {
+      const body = JSON.parse(request.body as string);
+      expect(body).not.toHaveProperty('temperature');
+    }
+  });
+});
