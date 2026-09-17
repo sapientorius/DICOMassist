@@ -31,14 +31,26 @@ export interface ChatMessage {
   timestamp: number;
 }
 
-export type ProviderType = 'claude' | 'ollama';
+export type ProviderType = 'claude' | 'ollama' | 'lmstudio' | 'openrouter' | 'openai';
 
+export interface ProviderProfile {
+  /** Runtime credential. It is optional for local providers. */
+  apiKey?: string;
+  /** OpenAI-compatible API root, used by local providers. */
+  baseUrl?: string;
+  /** Call 1 and text-only follow-up model. */
+  textModel?: string;
+  /** Call 2 model. It must support image input. */
+  visionModel?: string;
+}
+
+/**
+ * Settings are retained per provider so switching providers never discards a
+ * previously configured API key, endpoint, or model pair.
+ */
 export interface ProviderConfig {
   provider: ProviderType;
-  apiKey?: string;           // Claude only
-  ollamaTextModel?: string;  // Ollama model for Call 1 (text-only planning)
-  ollamaVisionModel?: string; // Ollama model for Call 2 (multimodal analysis)
-  ollamaUrl?: string;        // Ollama base URL override
+  profiles: Partial<Record<ProviderType, ProviderProfile>>;
 }
 
 export interface ViewportContext {

@@ -16,6 +16,7 @@ import type { AnatomicalPlane } from './dicom/orientationUtils';
 import type { StudyMetadata } from './dicom/types';
 import type { ProviderConfig, ViewportContext } from './llm/types';
 import { useLLMChat, type SliceMapping } from './llm/useLLMChat';
+import { createDefaultProviderConfig, migrateProviderConfig } from './llm/providerConfig';
 import { logger } from './utils/logger';
 
 const STORAGE_KEY = 'dicomassist-llm-config';
@@ -23,9 +24,9 @@ const STORAGE_KEY = 'dicomassist-llm-config';
 function loadConfig(): ProviderConfig {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return JSON.parse(saved);
+    if (saved) return migrateProviderConfig(JSON.parse(saved));
   } catch { /* ignore */ }
-  return { provider: 'ollama' };
+  return createDefaultProviderConfig();
 }
 
 function saveConfig(config: ProviderConfig) {

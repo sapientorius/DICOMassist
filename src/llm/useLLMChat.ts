@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import type { StudyMetadata } from '../dicom/types';
 import type { SelectionPlan, SeriesSelection, ChatMessage, ProviderConfig, ViewportContext } from './types';
-import { createLLMService } from './LLMServiceFactory';
+import { createLLMService, getConfiguredModels } from './LLMServiceFactory';
 import { selectSlicesForSelection } from '../filtering/SliceSelector';
 import { exportSlicesToJpeg } from '../filtering/SliceExporter';
 import { logger } from '../utils/logger';
@@ -214,13 +214,12 @@ export function useLLMChat(
     setError(null);
 
     // Initialize pipeline
-    const textModel = providerConfig.provider === 'ollama' ? (providerConfig.ollamaTextModel || 'alibayram/medgemma:4b') : 'claude';
-    const visionModel = providerConfig.provider === 'ollama' ? (providerConfig.ollamaVisionModel || 'llava:7b') : 'claude';
+    const { providerLabel, textModel, visionModel } = getConfiguredModels(providerConfig);
     const initialSteps: PipelineStep[] = [
-      { id: 'plan', label: `Selection planning (${textModel})`, status: 'pending' },
+      { id: 'plan', label: `Selection planning (${providerLabel}: ${textModel})`, status: 'pending' },
       { id: 'select', label: 'Selecting slices', status: 'pending' },
       { id: 'export', label: 'Exporting images', status: 'pending' },
-      { id: 'analyze', label: `Analyzing images (${visionModel})`, status: 'pending' },
+      { id: 'analyze', label: `Analyzing images (${providerLabel}: ${visionModel})`, status: 'pending' },
     ];
     setPipeline({ steps: initialSteps, plan: null, sliceCount: 0, totalSlices: 0, exportedSizes: [], sliceMappings: [] });
 

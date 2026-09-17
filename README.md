@@ -31,7 +31,7 @@ A knee MRI can have 200+ slices across 8+ series. Dumping them all to an AI give
 - **Privacy-first** — DICOM files are processed entirely in your browser. No data is uploaded to any server. Image data is only sent to the LLM provider you configure when you run an analysis
 - **Multiple layouts** — 1×1, 1×2, 2×1, 2×2 grid, and MPR (axial/sagittal/coronal)
 - **Standard tools** — Window/Level, Zoom, Pan, Length measurement, Rotate, Flip, Invert, Cine playback
-- **Provider-agnostic** — Works with Claude API (recommended) or local models via Ollama
+- **Provider-agnostic** — Works with Claude, OpenAI, OpenRouter, Ollama, and LM Studio; select separate planning and vision models for each provider
 
 ## Getting Started
 
@@ -51,10 +51,19 @@ npm run dev
 ### Configure AI analysis
 
 1. Click the ⚙ Settings icon in the toolbar
-2. Select **Claude API** and enter your API key ([get one here](https://console.anthropic.com))
-3. Load DICOM files, click **Analyze**, and describe what to evaluate
+2. Select a provider and enter its API key when required
+3. Refresh its model catalogue, then choose a **Planning model** and a vision-capable **Vision model**
+4. Load DICOM files, click **Analyze**, and describe what to evaluate
 
-For local models, install [Ollama](https://ollama.ai), pull a model (`ollama pull gemma3:4b`), and select Ollama in settings. Note: local models produce significantly lower quality results for medical image analysis compared to Claude.
+Supported providers:
+
+- **Claude API** — enter an API key from [Anthropic](https://console.anthropic.com).
+- **OpenAI** — enter an OpenAI API key and choose models available to your account.
+- **OpenRouter** — enter an OpenRouter API key and select a text model plus an image-capable model from its catalogue.
+- **Ollama** — install [Ollama](https://ollama.ai), run `ollama serve`, pull a model such as `gemma3:4b`, then refresh the local model list.
+- **LM Studio** — start the Developer server, normally at `http://localhost:1234/v1`, load a model, then refresh the local model list. A server token is optional.
+
+The planning model is used for Call 1 and text-only follow-ups. The vision model is used only for Call 2 and must accept image input. API keys are saved only in your browser's localStorage. When using Claude, OpenAI, or OpenRouter, rendered slices and the clinical prompt are sent directly to that selected provider when analysis runs.
 
 ### Sample data
 
@@ -68,8 +77,8 @@ To try DICOMassist, you can use public DICOM datasets:
 
 - **React 18** + TypeScript + Vite
 - **Cornerstone3D v4** — medical image rendering, viewport management, tools
-- **Claude API** (Anthropic) — multimodal LLM for image analysis
-- **Ollama** — optional local model support
+- **Claude API**, **OpenAI**, **OpenRouter** — cloud LLM providers
+- **Ollama**, **LM Studio** — optional local model providers
 
 ## Architecture
 
