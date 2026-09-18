@@ -26,8 +26,15 @@ const structuredAnalysisJson = JSON.stringify({
   summary: 'analysis',
   findings: [{ summary: 'finding', confidence: 'probable', imageIndices: [1] }],
   limitations: ['sampled images'],
+  evidenceLedger: { entriesJson: '[]' },
   imageRequest: null,
   additionalImageRequest: { needed: false, reason: '', selections: [] },
+});
+
+const finalAnalysisJson = JSON.stringify({
+  summary: 'final analysis',
+  findings: [{ summary: 'final finding', confidence: 'probable', imageIndices: [1] }],
+  limitations: ['sampled evidence'],
 });
 
 afterEach(() => {
@@ -97,6 +104,7 @@ describe('OpenAI-compatible provider requests', () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: selectionPlanJson } }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: structuredAnalysisJson } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: finalAnalysisJson } }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: 'follow-up' } }] }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
@@ -106,15 +114,21 @@ describe('OpenAI-compatible provider requests', () => {
     await expect(service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'])).resolves.toMatchObject({
       summary: 'analysis', findings: [{ confidence: 'probable', imageIndices: [1] }],
     });
+    await expect(service.synthesizeFinalAnalysis([new Blob(['jpeg'])], metadata, 'hint', plan, ['[asset-1] Slice 1'], { entries: [] })).resolves.toMatchObject({
+      summary: 'final analysis', findings: [{ confidence: 'probable', imageIndices: [1] }],
+    });
     await expect(service.sendFollowUp([{ id: '1', role: 'user', content: 'Explain more', timestamp: 1 }], metadata)).resolves.toBe('follow-up');
 
     const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
     const analysisBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
-    const followUpBody = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    const finalBody = JSON.parse(fetchMock.mock.calls[2][1].body as string);
+    const followUpBody = JSON.parse(fetchMock.mock.calls[3][1].body as string);
 
     expect(firstBody.model).toBe('planner-model');
     expect(analysisBody.model).toBe('vision-model');
     expect(analysisBody.messages[1].content[0].image_url.url).toMatch(/^data:image\/jpeg;base64,/);
+    expect(finalBody.model).toBe('vision-model');
+    expect(finalBody.messages[0].content).toContain('final user-facing synthesis');
     expect(followUpBody.model).toBe('planner-model');
   });
 
@@ -130,7 +144,8 @@ describe('Ollama request budgets', () => {
   it('passes the configured context and response budget to local inference', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: selectionPlanJson } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: structuredAnalysisJson } }), { status: 200 }));
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: structuredAnalysisJson } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: { content: finalAnalysisJson } }), { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
     const service = createLLMService({
       provider: 'ollama',
@@ -139,6 +154,7 @@ describe('Ollama request budgets', () => {
     const settings = { profile: 'custom' as const, maxImages: 12, maxImagePixels: 786_432, maxRefinementRounds: 1, contextWindowTokens: 32_768, responseTokenBudget: 3_072 };
     const plan = await service.getSelectionPlan(metadata, 'look for a finding', undefined, settings);
     await service.analyzeSlices([new Blob(['jpeg'])], metadata, 'hint', plan, ['Slice 1'], false, { settings, refinementRound: 0, remainingRefinementRounds: 1 });
+    await service.synthesizeFinalAnalysis([new Blob(['jpeg'])], metadata, 'hint', plan, ['[asset-1] Slice 1'], { entries: [] }, settings);
 
     for (const [, request] of fetchMock.mock.calls) {
       const body = JSON.parse(request.body as string);
@@ -202,7 +218,7 @@ describe('Claude provider requests', () => {
       anyOf: [{ type: 'number' }, { type: 'null' }],
     });
     expect(analysisBody.output_config.format.schema).toMatchObject({
-      required: ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest'],
+      required: ['nextAction', 'summary', 'findings', 'limitations', 'evidenceLedger', 'imageRequest'],
       additionalProperties: false,
     });
     expect(analysisBody.output_config.format.schema.properties.imageRequest).toEqual({
@@ -216,7 +232,7 @@ describe('Claude provider requests', () => {
         },
       ],
     });
-    expect(analysisBody).not.toHaveProperty('thinking');
+    expect(analysisBody.thinking).toEqual({ type: 'disabled' });
     expect(followUpBody).not.toHaveProperty('output_config');
     expect(followUpBody).not.toHaveProperty('thinking');
 

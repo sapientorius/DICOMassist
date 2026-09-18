@@ -291,16 +291,12 @@ export function buildAnalysisSystemPrompt(
     '',
     'Analyze the provided images in the context of the clinical question and study metadata.',
     '',
-    '## USER-FACING, STANDALONE SYNTHESIS',
-    'Your response may be the ONLY analysis the user sees from a multi-round image-retrieval workflow.',
-    'Treat EVERY image in the delivered image manifest as one cumulative image set and write a complete, standalone',
-    'assessment of that set. Restate all material findings, relevant negative findings, and limitations directly.',
-    'Do NOT refer to a "previous response", "previous round", "earlier assessment", "prior evaluation",',
-    '"additional images", "newly added images", or findings being "unchanged" or "confirmed". The user cannot see',
-    'intermediate model responses. Do not imply that the reader has seen them either.',
-    'If different renderings or targeted slices corroborate a finding, state the final finding and cite the relevant',
-    'images; do not describe the internal retrieval sequence. For example, write "Focal signal alteration is visible…",',
-    'not "Additional images confirm the prior finding".',
+    '## EVIDENCE LEDGER',
+    'This is an internal retrieval round. The user will only see a later, separate final synthesis.',
+    'Return a complete updated evidence ledger alongside your retrieval decision. Preserve an existing ledger entry ID',
+    'when it represents the same hypothesis; mark it "resolved" or "ruled_out" instead of silently dropping it.',
+    'Use only stable image asset IDs from the delivered image manifest. Keep at most 12 material entries and at most',
+    '4 representative asset IDs per entry. Do not create a ledger entry for incidental narrative detail.',
     '',
     '## CRITICAL ANALYSIS RULES',
     '',
@@ -349,6 +345,7 @@ export function buildAnalysisSystemPrompt(
     '- summary: string',
     '- findings: array of {summary, confidence: "definite"|"probable"|"possible"|"indeterminate", imageIndices: number[]}',
     '- limitations: string[]',
+    '- evidenceLedger: {entriesJson}, where entriesJson is a JSON-encoded array of {id, status: "active"|"resolved"|"ruled_out", summary, confidence, assetIds: string[], openQuestion?: string}.',
     '- imageRequest: null when nextAction is "complete"; otherwise {reason, requestsJson}.',
     '- requestsJson is a JSON-encoded string containing the requests array (no markdown or prose inside the string).',
     'Each request has a kind, renderings, and optional priority. Supported kinds are:',
@@ -381,8 +378,8 @@ export function buildAnalysisSystemPrompt(
     '- To inspect a small ambiguous region, use crop with the 1-based sourceImageIndex and a normalized rect.',
     '- To confirm a finding in another orientation/sequence, use cross-plane with the sourceImageIndex and targetSeriesInstanceUID.',
     '- Include at least one rendering for every request; use dicom-default unless a specific window/level or display change is required.',
-    'Example imageRequest: {"reason":"Confirm whether the focal opacity persists across adjacent sections.","requestsJson":"[{\\\"kind\\\":\\\"neighbours\\\",\\\"sourceImageIndex\\\":7,\\\"before\\\":2,\\\"after\\\":2,\\\"renderings\\\":[{\\\"mode\\\":\\\"dicom-default\\\"}]}]"}.',
-    'The client retrieves the requested images locally and sends them back to you in the next round, together with all images already delivered.',
+    'Example imageRequest: {"reason":"Confirm whether the focal opacity persists across adjacent sections.","requestsJson":"[{\\"kind\\":\\"neighbours\\",\\"sourceImageIndex\\":7,\\"before\\":2,\\"after\\":2,\\"renderings\\":[{\\"mode\\":\\"dicom-default\\"}]}]"}.',
+    'The client retrieves requested images locally and sends a context-budgeted evidence set in the next round.',
     refinement
       ? refinement.remainingRefinementRounds > 0 && (refinement.remainingImageBudget ?? 0) > 0
         ? `This is refinement round ${refinement.refinementRound}. ${refinement.remainingRefinementRounds} round(s), ${refinement.remainingImageBudget ?? 0} total image slot(s), and ${refinement.maxNewImages ?? 0} new image slot(s) are available now. Request only what fits in this round. The image budget is reserved for resolving material visual uncertainty; use it when the finality gate fails.`
@@ -396,7 +393,7 @@ export function buildAnalysisUserPrompt(
   clinicalHint: string,
   plan: SelectionPlan,
   sliceLabels: string[],
-  context?: Pick<AnalysisRequestContext, 'imageManifest' | 'seriesCatalog'>,
+  context?: Pick<AnalysisRequestContext, 'imageManifest' | 'seriesCatalog' | 'evidenceLedger'>,
 ): string {
   const lines = [
     `Analyze ONLY the following ${sliceLabels.length} images.`,
@@ -462,8 +459,63 @@ export function buildAnalysisUserPrompt(
   if (context?.imageManifest) {
     lines.push('', '=== DELIVERED IMAGE MANIFEST ===', context.imageManifest);
   }
+  if (context?.evidenceLedger?.entries.length) {
+    lines.push('', '=== CURRENT INTERNAL EVIDENCE LEDGER ===', JSON.stringify(context.evidenceLedger));
+  }
 
   return lines.join('\n');
+}
+
+export function buildFinalAnalysisSystemPrompt(surveyMode?: boolean): string {
+  return [
+    'You are a medical imaging AI assistant writing the final user-facing synthesis of a DICOM analysis.',
+    DISCLAIMER,
+    '',
+    'The image retrieval workflow is complete. Write ONE self-contained assessment from the supplied final evidence images',
+    'and evidence ledger. The user cannot see intermediate rounds or internal retrieval activity.',
+    'Do NOT refer to previous rounds, prior assessments, additional images, confirmation, or the evidence ledger itself.',
+    'State final findings directly and cite only supplied image indices. Do not make claims unsupported by the supplied final images.',
+    ...(surveyMode ? ['Perform the requested structure-by-structure survey only for structures visible in the final evidence images.'] : []),
+    '',
+    'Return ONLY a JSON object with these exact fields:',
+    '- summary: string',
+    '- findings: array of {summary, confidence: "definite"|"probable"|"possible"|"indeterminate", imageIndices: number[]}',
+    '- limitations: string[]',
+  ].join('\n');
+}
+
+export function buildFinalAnalysisUserPrompt(
+  metadata: StudyMetadata,
+  clinicalHint: string,
+  plan: SelectionPlan,
+  sliceLabels: string[],
+  evidenceLedger: AnalysisRequestContext['evidenceLedger'],
+): string {
+  const relevantSeries = plan.selections.map((selection) => {
+    const series = metadata.series.find((candidate) => String(candidate.seriesNumber) === selection.seriesNumber);
+    if (!series) return `Series #${selection.seriesNumber}: selected for final evidence.`;
+    return `Series #${series.seriesNumber}: ${series.seriesDescription || '(unnamed)'} | ${series.anatomicalPlane} | ${series.modality} | ${series.slices.length} slices | range ${selection.sliceRange[0]}-${selection.sliceRange[1]}`;
+  });
+  return [
+    `Clinical question: ${clinicalHint}`,
+    `Study: ${metadata.studyDescription} | ${metadata.modality}`,
+    ...(metadata.patientAge ? [`Patient: ${metadata.patientAge} ${metadata.patientSex ?? ''}`.trim()] : []),
+    '',
+    '=== RELEVANT SERIES METADATA ===',
+    ...relevantSeries,
+    '',
+    `You are provided EXACTLY ${sliceLabels.length} final evidence images.`,
+    '',
+    '=== FINAL EVIDENCE LEDGER ===',
+    JSON.stringify(evidenceLedger ?? { entries: [] }),
+    '',
+    `Selection reasoning: ${plan.reasoning}`,
+    '',
+    '=== FINAL IMAGE MANIFEST ===',
+    ...sliceLabels.map((label, index) => `Image ${index + 1}: ${label}`),
+    '',
+    'Write the final report directly. Cite findings only with the numbered images in this manifest.',
+  ].join('\n');
 }
 
 export function buildFollowUpSystemPrompt(): string {

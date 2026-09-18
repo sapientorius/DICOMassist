@@ -27,7 +27,7 @@ describe('Claude structured image analysis', () => {
       .mockResolvedValueOnce(claudeResponse([{ type: 'thinking' }], 'max_tokens'))
       .mockResolvedValueOnce(claudeResponse([{
         type: 'text', text: JSON.stringify({
-          nextAction: 'complete', summary: 'Recovered structured result.', findings: [], limitations: [], imageRequest: null,
+          nextAction: 'complete', summary: 'Recovered structured result.', findings: [], limitations: [], imageRequest: null, evidenceLedger: { entriesJson: '[]' },
         }),
       }]));
     vi.stubGlobal('fetch', fetchMock);
@@ -46,5 +46,25 @@ describe('Claude structured image analysis', () => {
     const retryRequest = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(firstRequest.thinking).toEqual({ type: 'disabled' });
     expect(retryRequest.system).toContain('RECOVERY: Your previous response was empty');
+  });
+
+  it('uses the separate structured final-synthesis contract', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(claudeResponse([{
+      type: 'text', text: JSON.stringify({ summary: 'Final report.', findings: [], limitations: ['Sampling limitation.'] }),
+    }]));
+    vi.stubGlobal('fetch', fetchMock);
+    const config: ProviderConfig = {
+      provider: 'claude',
+      profiles: { claude: { apiKey: 'test-key', textModel: 'claude-sonnet-5', visionModel: 'claude-sonnet-5' } },
+    };
+
+    const result = await createLLMService(config).synthesizeFinalAnalysis(
+      [new Blob(['jpeg'])], makeStudy(), 'Evaluate target.', plan, ['[asset-1] Series #1 Slice 1/30'], { entries: [] },
+    );
+
+    expect(result).toMatchObject({ summary: 'Final report.', limitations: ['Sampling limitation.'] });
+    const request = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+    expect(request.system).toContain('final user-facing synthesis');
+    expect(request.thinking).toEqual({ type: 'disabled' });
   });
 });

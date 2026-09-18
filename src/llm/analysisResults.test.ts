@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatStructuredAnalysis, parseStructuredAnalysis } from './analysisResults';
+import { formatFinalAnalysis, formatStructuredAnalysis, parseEvidenceLedger, parseFinalAnalysis, parseStructuredAnalysis } from './analysisResults';
 
 describe('structured analysis results', () => {
   it('preserves evidence references and a targeted additional-image request', () => {
@@ -43,5 +43,27 @@ describe('structured analysis results', () => {
     expect(result.summary).toBe('free text response');
     expect(result.findings).toEqual([]);
     expect(result.additionalImageRequest.needed).toBe(false);
+  });
+
+  it('sanitizes and bounds an internal evidence ledger', () => {
+    const ledger = parseEvidenceLedger({
+      entriesJson: JSON.stringify([
+        { id: 'F1', status: 'active', summary: 'Focal finding', confidence: 'probable', assetIds: ['asset-1', 'asset-1', 'asset-2', 'asset-3', 'asset-4', 'asset-5'], openQuestion: 'Persistence?' },
+        { id: 'F1', status: 'resolved', summary: 'Duplicate identifier', confidence: 'definite', assetIds: [] },
+        ...Array.from({ length: 12 }, (_, index) => ({ id: `F${index + 2}`, status: 'ruled_out', summary: `Finding ${index}`, confidence: 'possible', assetIds: [] })),
+      ]),
+    });
+
+    expect(ledger.entries).toHaveLength(12);
+    expect(ledger.entries[0]).toMatchObject({ id: 'F1', status: 'active', assetIds: ['asset-1', 'asset-2', 'asset-3', 'asset-4'] });
+  });
+
+  it('requires valid structured final output and formats only the final report', () => {
+    const final = parseFinalAnalysis(JSON.stringify({
+      summary: 'Final synthesis.', findings: [{ summary: 'Feature', confidence: 'possible', imageIndices: [1] }], limitations: [],
+    }));
+
+    expect(formatFinalAnalysis(final, ['[asset-1] Slice 1'])).toContain('Final synthesis.');
+    expect(() => parseFinalAnalysis('non-JSON')).toThrow('structured final analysis');
   });
 });

@@ -1,13 +1,15 @@
 import type { StudyMetadata } from '../dicom/types';
-import type { SelectionPlan, SeriesSelection, ChatMessage, ProviderConfig, ProviderProfile, ProviderType, LLMService, ViewportContext, StructuredAnalysis, AnalysisRequestContext, DisplayWindow } from './types';
+import type { SelectionPlan, SeriesSelection, ChatMessage, ProviderConfig, ProviderProfile, ProviderType, LLMService, ViewportContext, StructuredAnalysis, AnalysisRequestContext, DisplayWindow, EvidenceLedger, FinalAnalysis } from './types';
 import type { AnalysisSettings } from './analysisConfig';
-import { parseStructuredAnalysis } from './analysisResults';
+import { parseFinalAnalysis, parseStructuredAnalysis } from './analysisResults';
 import { DEFAULT_LM_STUDIO_URL, DEFAULT_OLLAMA_URL, getProviderProfile, PROVIDER_LABELS } from './providerConfig';
 import {
   buildSelectionSystemPrompt,
   buildSelectionUserPrompt,
   buildAnalysisSystemPrompt,
   buildAnalysisUserPrompt,
+  buildFinalAnalysisSystemPrompt,
+  buildFinalAnalysisUserPrompt,
   buildFollowUpSystemPrompt,
 } from './PromptBuilder';
 
@@ -112,6 +114,12 @@ const ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
       },
     },
     limitations: { type: 'array', items: { type: 'string' } },
+    evidenceLedger: {
+      type: 'object',
+      properties: { entriesJson: { type: 'string' } },
+      required: ['entriesJson'],
+      additionalProperties: false,
+    },
     imageRequest: {
       anyOf: [
         { type: 'null' },
@@ -130,7 +138,30 @@ const ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
       ],
     },
   },
-  required: ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest'],
+  required: ['nextAction', 'summary', 'findings', 'limitations', 'evidenceLedger', 'imageRequest'],
+  additionalProperties: false,
+};
+
+const FINAL_ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    findings: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          summary: { type: 'string' },
+          confidence: { type: 'string', enum: ['definite', 'probable', 'possible', 'indeterminate'] },
+          imageIndices: { type: 'array', items: { type: 'number' } },
+        },
+        required: ['summary', 'confidence', 'imageIndices'],
+        additionalProperties: false,
+      },
+    },
+    limitations: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['summary', 'findings', 'limitations'],
   additionalProperties: false,
 };
 
@@ -155,8 +186,19 @@ function hasStructuredAnalysisShape(text: string): boolean {
     const value = JSON.parse(extractJson(text));
     if (!value || typeof value !== 'object') return false;
     const raw = value as Record<string, unknown>;
-    return ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest']
+    return ['nextAction', 'summary', 'findings', 'limitations', 'evidenceLedger', 'imageRequest']
       .every((key) => Object.prototype.hasOwnProperty.call(raw, key));
+  } catch {
+    return false;
+  }
+}
+
+function hasFinalAnalysisShape(text: string): boolean {
+  try {
+    const value = JSON.parse(extractJson(text));
+    if (!value || typeof value !== 'object') return false;
+    const raw = value as Record<string, unknown>;
+    return ['summary', 'findings', 'limitations'].every((key) => Object.prototype.hasOwnProperty.call(raw, key));
   } catch {
     return false;
   }
@@ -410,6 +452,41 @@ class ClaudeService implements LLMService {
     return parseStructuredAnalysis(response.text);
   }
 
+  async synthesizeFinalAnalysis(
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], evidenceLedger: EvidenceLedger, settings?: AnalysisSettings, surveyMode?: boolean,
+  ): Promise<FinalAnalysis> {
+    const imageContents = await Promise.all(images.map(async (blob, index) => [
+      {
+        type: 'image' as const,
+        source: { type: 'base64' as const, media_type: 'image/jpeg' as const, data: await blobToBase64(blob) },
+      },
+      { type: 'text' as const, text: sliceLabels[index] ?? `Image ${index + 1}` },
+    ]));
+    const params: ClaudeCallParams = {
+      system: buildFinalAnalysisSystemPrompt(surveyMode),
+      messages: [{
+        role: 'user',
+        content: [...imageContents.flat(), { type: 'text' as const, text: buildFinalAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, evidenceLedger) }],
+      }],
+      maxTokens: settings?.responseTokenBudget ?? 4096,
+      outputSchema: FINAL_ANALYSIS_OUTPUT_SCHEMA,
+      thinking: this.supportsAdaptiveThinking(this.visionModel) ? { type: 'disabled' } : undefined,
+    };
+    let response = await this.callClaude(this.visionModel, params);
+    if (!hasFinalAnalysisShape(response.text)) {
+      response = await this.callClaude(this.visionModel, {
+        ...params,
+        system: `${params.system}\n\nRECOVERY: Return the complete final JSON object now. Do not include explanation, markdown, or internal reasoning.`,
+      });
+    }
+    if (!hasFinalAnalysisShape(response.text)) {
+      const stopReason = response.stopReason ?? 'unknown';
+      const contentTypes = response.contentTypes.length ? response.contentTypes.join(', ') : 'none';
+      throw new Error(`Claude returned no usable structured final analysis after one retry (stop reason: ${stopReason}; content blocks: ${contentTypes}).`);
+    }
+    return parseFinalAnalysis(response.text);
+  }
+
   async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {
     return (await this.callClaude(this.textModel, {
       system: `${buildFollowUpSystemPrompt()}\n\nStudy context: ${metadata.studyDescription}`,
@@ -527,6 +604,21 @@ class OllamaService implements LLMService {
     }).then(parseStructuredAnalysis);
   }
 
+  async synthesizeFinalAnalysis(
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], evidenceLedger: EvidenceLedger, settings?: AnalysisSettings, surveyMode?: boolean,
+  ): Promise<FinalAnalysis> {
+    const base64Images = await Promise.all(images.map(blobToBase64));
+    const manifest = sliceLabels.map((label, index) => `  ${index + 1}. ${label}`).join('\n');
+    const response = await this.callOllama({
+      model: this.visionModel,
+      system: buildFinalAnalysisSystemPrompt(surveyMode),
+      images: base64Images,
+      settings,
+      userContent: `FINAL IMAGE MANIFEST (${sliceLabels.length} images, in sequential order):\n${manifest}\n\n${buildFinalAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, evidenceLedger)}`,
+    });
+    return parseFinalAnalysis(response);
+  }
+
   async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {
     return this.callOllama({
       model: this.textModel, system: '', userContent: '',
@@ -608,6 +700,23 @@ class OpenAICompatibleService implements LLMService {
       { role: 'system', content: buildAnalysisSystemPrompt(surveyMode, context) },
       { role: 'user', content },
     ], context?.settings.responseTokenBudget ?? 4096).then(parseStructuredAnalysis);
+  }
+
+  async synthesizeFinalAnalysis(
+    images: Blob[], metadata: StudyMetadata, clinicalHint: string, plan: SelectionPlan, sliceLabels: string[], evidenceLedger: EvidenceLedger, settings?: AnalysisSettings, surveyMode?: boolean,
+  ): Promise<FinalAnalysis> {
+    const content: Array<Record<string, unknown>> = [];
+    for (let index = 0; index < images.length; index++) {
+      content.push(
+        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${await blobToBase64(images[index])}` } },
+        { type: 'text', text: sliceLabels[index] ?? `Image ${index + 1}` },
+      );
+    }
+    content.push({ type: 'text', text: buildFinalAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, evidenceLedger) });
+    return this.callChat(this.visionModel, [
+      { role: 'system', content: buildFinalAnalysisSystemPrompt(surveyMode) },
+      { role: 'user', content },
+    ], settings?.responseTokenBudget ?? 4096).then(parseFinalAnalysis);
   }
 
   async sendFollowUp(conversationHistory: ChatMessage[], metadata: StudyMetadata, settings?: AnalysisSettings): Promise<string> {

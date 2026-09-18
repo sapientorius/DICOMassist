@@ -125,10 +125,34 @@ export interface FindingEvidence {
   imageIndices: number[];
 }
 
+export type EvidenceStatus = 'active' | 'resolved' | 'ruled_out';
+
+/** A compact, local-only state snapshot carried between adaptive vision rounds. */
+export interface EvidenceLedgerEntry {
+  id: string;
+  status: EvidenceStatus;
+  summary: string;
+  confidence: FindingEvidence['confidence'];
+  /** Stable client-side image asset IDs, not transient per-request image indices. */
+  assetIds: string[];
+  openQuestion?: string;
+}
+
+export interface EvidenceLedger {
+  entries: EvidenceLedgerEntry[];
+}
+
+export interface FinalAnalysis {
+  summary: string;
+  findings: FindingEvidence[];
+  limitations: string[];
+}
+
 export interface StructuredAnalysis {
   summary: string;
   findings: FindingEvidence[];
   limitations: string[];
+  evidenceLedger: EvidenceLedger;
   /** The only state transition that may trigger another vision round. */
   nextAction: 'request_images' | 'complete';
   imageRequest?: AdaptiveImageRequestSet;
@@ -144,6 +168,7 @@ export interface AnalysisRequestContext {
   maxNewImages?: number;
   imageManifest?: string;
   seriesCatalog?: string;
+  evidenceLedger?: EvidenceLedger;
 }
 
 /**
@@ -173,6 +198,16 @@ export interface LLMService {
     surveyMode?: boolean,
     context?: AnalysisRequestContext,
   ): Promise<StructuredAnalysis>;
+  synthesizeFinalAnalysis(
+    images: Blob[],
+    metadata: StudyMetadata,
+    clinicalHint: string,
+    plan: SelectionPlan,
+    sliceLabels: string[],
+    evidenceLedger: EvidenceLedger,
+    settings?: AnalysisSettings,
+    surveyMode?: boolean,
+  ): Promise<FinalAnalysis>;
   sendFollowUp(
     conversationHistory: ChatMessage[],
     metadata: StudyMetadata,

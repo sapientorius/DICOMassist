@@ -2,6 +2,9 @@ import type {
   AdaptiveImageRequest,
   AdaptiveImageRequestSet,
   AdditionalImageRequest,
+  EvidenceLedger,
+  EvidenceLedgerEntry,
+  FinalAnalysis,
   FindingEvidence,
   RenderSpec,
   SeriesSelection,
@@ -161,6 +164,48 @@ function parseFinding(value: unknown): FindingEvidence | null {
   return summary ? { summary, confidence, imageIndices } : null;
 }
 
+const MAX_LEDGER_ENTRIES = 12;
+const MAX_EVIDENCE_ASSETS_PER_ENTRY = 4;
+
+function parseLedgerEntry(value: unknown): EvidenceLedgerEntry | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const id = asString(raw.id);
+  const summary = asString(raw.summary);
+  if (!id || !summary) return null;
+  const status = raw.status === 'resolved' || raw.status === 'ruled_out' ? raw.status : 'active';
+  const confidence = raw.confidence === 'definite' || raw.confidence === 'probable' || raw.confidence === 'possible'
+    ? raw.confidence
+    : 'indeterminate';
+  const assetIds = Array.isArray(raw.assetIds)
+    ? [...new Set(raw.assetIds.map((assetId) => asString(assetId)).filter(Boolean))].slice(0, MAX_EVIDENCE_ASSETS_PER_ENTRY)
+    : [];
+  return { id, status, summary, confidence, assetIds, openQuestion: asString(raw.openQuestion) || undefined };
+}
+
+export function parseEvidenceLedger(value: unknown): EvidenceLedger {
+  if (!value || typeof value !== 'object') return { entries: [] };
+  const raw = value as Record<string, unknown>;
+  let entries: unknown[] = [];
+  if (Array.isArray(raw.entries)) entries = raw.entries;
+  else if (typeof raw.entriesJson === 'string') {
+    try {
+      const parsed = JSON.parse(raw.entriesJson);
+      if (Array.isArray(parsed)) entries = parsed;
+    } catch {
+      // Invalid model-owned ledger state is ignored rather than becoming trusted state.
+    }
+  }
+  const seen = new Set<string>();
+  return {
+    entries: entries
+      .map(parseLedgerEntry)
+      .filter((entry): entry is EvidenceLedgerEntry => entry !== null)
+      .filter((entry) => !seen.has(entry.id) && Boolean(seen.add(entry.id)))
+      .slice(0, MAX_LEDGER_ENTRIES),
+  };
+}
+
 /** Parse provider JSON defensively; a plain-text response is preserved as a limitation, never discarded. */
 export function parseStructuredAnalysis(rawText: string): StructuredAnalysis {
   try {
@@ -173,11 +218,13 @@ export function parseStructuredAnalysis(rawText: string): StructuredAnalysis {
       : [];
     const imageRequest = parseAdaptiveRequestSet(raw.imageRequest);
     const legacy = parseImageRequest(raw.additionalImageRequest);
+    const evidenceLedger = parseEvidenceLedger(raw.evidenceLedger);
     const nextAction = raw.nextAction === 'request_images' && imageRequest ? 'request_images' : 'complete';
     return {
       summary: asString(raw.summary, 'The model returned no summary.'),
       findings,
       limitations,
+      evidenceLedger,
       nextAction,
       imageRequest,
       additionalImageRequest: legacy,
@@ -187,9 +234,26 @@ export function parseStructuredAnalysis(rawText: string): StructuredAnalysis {
       summary: rawText.trim() || 'The model returned no analysis.',
       findings: [],
       limitations: ['The provider did not return the requested structured analysis format.'],
+      evidenceLedger: { entries: [] },
       nextAction: 'complete',
       additionalImageRequest: { needed: false, selections: [] },
     };
+  }
+}
+
+/** Final synthesis deliberately omits retrieval controls and ledger state. */
+export function parseFinalAnalysis(rawText: string): FinalAnalysis {
+  try {
+    const raw = JSON.parse(extractJson(rawText)) as Record<string, unknown>;
+    const findings = Array.isArray(raw.findings)
+      ? raw.findings.map(parseFinding).filter((finding): finding is FindingEvidence => finding !== null)
+      : [];
+    const limitations = Array.isArray(raw.limitations)
+      ? raw.limitations.map((value) => asString(value)).filter(Boolean)
+      : [];
+    return { summary: asString(raw.summary, 'The model returned no summary.'), findings, limitations };
+  } catch {
+    throw new Error('The provider did not return the requested structured final analysis format.');
   }
 }
 
@@ -210,4 +274,13 @@ export function formatStructuredAnalysis(analysis: StructuredAnalysis, imageLabe
   }
   lines.push('', 'Not for clinical diagnosis');
   return lines.join('\n');
+}
+
+export function formatFinalAnalysis(analysis: FinalAnalysis, imageLabels: string[]): string {
+  return formatStructuredAnalysis({
+    ...analysis,
+    evidenceLedger: { entries: [] },
+    nextAction: 'complete',
+    additionalImageRequest: { needed: false, selections: [] },
+  }, imageLabels);
 }

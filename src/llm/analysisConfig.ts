@@ -39,6 +39,22 @@ const MIN_RESPONSE_TOKENS = 512;
 const MAX_RESPONSE_TOKENS = 16_384;
 const SYSTEM_AND_METADATA_RESERVE = 2_048;
 
+/** Conservative cross-provider vision-token approximation used for actual rendered frames. */
+export function estimateImageTokens(pixelCount: number): number {
+  return Math.ceil(Math.max(MIN_IMAGE_PIXELS, Math.round(pixelCount)) / 750);
+}
+
+/**
+ * Leaves response, metadata and an additional 20% safety margin outside the
+ * image set. This is intentionally local so it works for remote and local
+ * providers without transmitting a token-counting preflight request.
+ */
+export function getSafeImageTokenBudget(settingsInput: Partial<AnalysisSettings> | undefined, extraPromptTokens = 0): number {
+  const settings = normaliseAnalysisSettings(settingsInput);
+  const safeInput = Math.floor(Math.max(0, settings.contextWindowTokens - settings.responseTokenBudget) * 0.8);
+  return Math.max(0, safeInput - SYSTEM_AND_METADATA_RESERVE - Math.max(0, Math.ceil(extraPromptTokens)));
+}
+
 const PROFILE_DEFAULTS: Record<Exclude<AnalysisProfileId, 'custom'>, Omit<AnalysisSettings, 'profile'>> = {
   fast: {
     maxImages: 8,
