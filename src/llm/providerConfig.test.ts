@@ -22,9 +22,11 @@ const selectionPlanJson = JSON.stringify({
 });
 
 const structuredAnalysisJson = JSON.stringify({
+  nextAction: 'complete',
   summary: 'analysis',
   findings: [{ summary: 'finding', confidence: 'probable', imageIndices: [1] }],
   limitations: ['sampled images'],
+  imageRequest: null,
   additionalImageRequest: { needed: false, reason: '', selections: [] },
 });
 
@@ -200,8 +202,19 @@ describe('Claude provider requests', () => {
       anyOf: [{ type: 'number' }, { type: 'null' }],
     });
     expect(analysisBody.output_config.format.schema).toMatchObject({
-      required: ['summary', 'findings', 'limitations', 'additionalImageRequest'],
+      required: ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest'],
       additionalProperties: false,
+    });
+    expect(analysisBody.output_config.format.schema.properties.imageRequest).toEqual({
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          properties: { reason: { type: 'string' }, requestsJson: { type: 'string' } },
+          required: ['reason', 'requestsJson'],
+          additionalProperties: false,
+        },
+      ],
     });
     expect(analysisBody).not.toHaveProperty('thinking');
     expect(followUpBody).not.toHaveProperty('output_config');
@@ -235,6 +248,24 @@ describe('Claude provider requests', () => {
     expect(body.temperature).toBe(0);
     expect(body).not.toHaveProperty('thinking');
     expect(body).toHaveProperty('output_config.format.schema');
+  });
+
+  it('retries once without structured output when Claude rejects a schema for complexity', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        type: 'error', error: { type: 'invalid_request_error', message: 'Schema is too complex.' },
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        content: [{ type: 'text', text: selectionPlanJson }], stop_reason: 'end_turn',
+      }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const service = createLLMService(claudeConfig);
+    await expect(service.getSelectionPlan(metadata, 'look for a finding')).resolves.toMatchObject({ targetSeries: '1' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const fallbackBody = JSON.parse(fetchMock.mock.calls[1][1].body as string);
+    expect(fallbackBody).not.toHaveProperty('output_config');
   });
 
   it('omits temperature for Claude Opus 4.7 and newer', async () => {

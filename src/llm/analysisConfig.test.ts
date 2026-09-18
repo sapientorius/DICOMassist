@@ -4,7 +4,7 @@ import { estimateAnalysisBudget, getProviderAnalysisSettings, normaliseAnalysisS
 describe('analysis settings and preflight budget', () => {
   it('provides portable named profiles and a larger Claude context declaration', () => {
     expect(normaliseAnalysisSettings({ profile: 'fast' })).toMatchObject({ maxImages: 8, maxRefinementRounds: 0 });
-    expect(normaliseAnalysisSettings({ profile: 'deep' })).toMatchObject({ maxImages: 32, maxRefinementRounds: 2 });
+    expect(normaliseAnalysisSettings({ profile: 'deep' })).toMatchObject({ maxImages: 100, maxRefinementRounds: 5, contextWindowTokens: 200_000 });
     expect(getProviderAnalysisSettings('claude')).toMatchObject({ contextWindowTokens: 200_000, maxImages: 16 });
   });
 
@@ -25,4 +25,3 @@ describe('analysis settings and preflight budget', () => {
     expect(estimate.warnings).not.toHaveLength(0);
   });
 });
-

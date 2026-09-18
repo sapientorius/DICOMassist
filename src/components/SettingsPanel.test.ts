@@ -15,6 +15,6 @@ describe('SettingsPanel analysis profiles', () => {
     expect(deepButton).toBeDefined();
     await deepButton!.trigger('click');
     const changed = wrapper.emitted('change')?.at(-1)?.[0] as ProviderConfig;
-    expect(changed.profiles.ollama?.analysis).toMatchObject({ profile: 'deep', maxImages: 32, maxRefinementRounds: 2, contextWindowTokens: 65_536 });
+    expect(changed.profiles.ollama?.analysis).toMatchObject({ profile: 'deep', maxImages: 100, maxRefinementRounds: 5, contextWindowTokens: 200_000 });
   });
 });

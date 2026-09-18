@@ -1,4 +1,12 @@
-import type { AdditionalImageRequest, FindingEvidence, SeriesSelection, StructuredAnalysis } from './types';
+import type {
+  AdaptiveImageRequest,
+  AdaptiveImageRequestSet,
+  AdditionalImageRequest,
+  FindingEvidence,
+  RenderSpec,
+  SeriesSelection,
+  StructuredAnalysis,
+} from './types';
 
 function extractJson(text: string): string {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -45,6 +53,101 @@ function parseImageRequest(value: unknown): AdditionalImageRequest {
   };
 }
 
+function parseRenderSpec(value: unknown): RenderSpec | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const label = asString(raw.label) || undefined;
+  if (raw.mode === 'dicom-default') return { mode: 'dicom-default', label };
+  if (raw.mode === 'window-level') {
+    const windowCenter = Number(raw.windowCenter);
+    const windowWidth = Number(raw.windowWidth);
+    return Number.isFinite(windowCenter) && Number.isFinite(windowWidth) && windowWidth > 0
+      ? { mode: 'window-level', windowCenter, windowWidth, label }
+      : null;
+  }
+  if (raw.mode === 'series-percentile') {
+    const lowPercentile = Number(raw.lowPercentile);
+    const highPercentile = Number(raw.highPercentile);
+    return Number.isFinite(lowPercentile) && Number.isFinite(highPercentile) && lowPercentile >= 0 && highPercentile <= 100 && lowPercentile < highPercentile
+      ? { mode: 'series-percentile', lowPercentile, highPercentile, label }
+      : null;
+  }
+  if (raw.mode === 'relative-display') {
+    const brightness = raw.brightness;
+    const contrast = raw.contrast;
+    if (!['darker', 'default', 'brighter'].includes(String(brightness)) || !['lower', 'default', 'higher'].includes(String(contrast))) return null;
+    return {
+      mode: 'relative-display',
+      brightness: brightness as 'darker' | 'default' | 'brighter',
+      contrast: contrast as 'lower' | 'default' | 'higher',
+      label,
+    };
+  }
+  return null;
+}
+
+function parseAdaptiveRequest(value: unknown): AdaptiveImageRequest | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const renderings = Array.isArray(raw.renderings) ? raw.renderings.map(parseRenderSpec).filter((rendering): rendering is RenderSpec => rendering !== null) : [];
+  if (!renderings.length) return null;
+  const priority = Number.isFinite(Number(raw.priority)) ? Number(raw.priority) : undefined;
+  if (raw.kind === 'instances') {
+    const instanceNumbers = Array.isArray(raw.instanceNumbers)
+      ? raw.instanceNumbers.map(Number).filter((number) => Number.isInteger(number))
+      : undefined;
+    const range = Array.isArray(raw.sliceRange) ? raw.sliceRange.map(Number) : [];
+    const sliceRange = Number.isInteger(range[0]) && Number.isInteger(range[1]) ? [range[0], range[1]] as [number, number] : undefined;
+    if (!asString(raw.seriesInstanceUID) || (!instanceNumbers?.length && !sliceRange)) return null;
+    const samplingStrategy = raw.samplingStrategy === 'every_nth' || raw.samplingStrategy === 'all' ? raw.samplingStrategy : 'uniform';
+    const samplingParam = Number.isFinite(Number(raw.samplingParam)) ? Number(raw.samplingParam) : undefined;
+    return { kind: 'instances', seriesInstanceUID: asString(raw.seriesInstanceUID), instanceNumbers, sliceRange, samplingStrategy, samplingParam, renderings, priority };
+  }
+  if (raw.kind === 'neighbours') {
+    const sourceImageIndex = Number(raw.sourceImageIndex);
+    const before = Number(raw.before);
+    const after = Number(raw.after);
+    return Number.isInteger(sourceImageIndex) && sourceImageIndex > 0 && Number.isInteger(before) && before >= 0 && Number.isInteger(after) && after >= 0
+      ? { kind: 'neighbours', sourceImageIndex, before, after, renderings, priority }
+      : null;
+  }
+  if (raw.kind === 'crop') {
+    const sourceImageIndex = Number(raw.sourceImageIndex);
+    const rect = Array.isArray(raw.rect) ? raw.rect.map(Number) : [];
+    const [left, top, width, height] = rect;
+    return Number.isInteger(sourceImageIndex) && sourceImageIndex > 0 && [left, top, width, height].every(Number.isFinite) && left >= 0 && top >= 0 && width > 0 && height > 0 && left + width <= 1 && top + height <= 1
+      ? { kind: 'crop', sourceImageIndex, rect: [left, top, width, height], renderings, priority }
+      : null;
+  }
+  if (raw.kind === 'cross-plane') {
+    const sourceImageIndex = Number(raw.sourceImageIndex);
+    const neighbours = raw.neighbours == null ? undefined : Number(raw.neighbours);
+    return Number.isInteger(sourceImageIndex) && sourceImageIndex > 0 && asString(raw.targetSeriesInstanceUID) && (neighbours == null || (Number.isInteger(neighbours) && neighbours >= 0))
+      ? { kind: 'cross-plane', sourceImageIndex, targetSeriesInstanceUID: asString(raw.targetSeriesInstanceUID), neighbours, renderings, priority }
+      : null;
+  }
+  return null;
+}
+
+function parseAdaptiveRequestSet(value: unknown): AdaptiveImageRequestSet | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  let rawRequests: unknown[] = [];
+  if (Array.isArray(raw.requests)) {
+    rawRequests = raw.requests;
+  } else if (typeof raw.requestsJson === 'string') {
+    try {
+      const parsed = JSON.parse(raw.requestsJson);
+      if (Array.isArray(parsed)) rawRequests = parsed;
+    } catch {
+      // A malformed deferred request is ignored; it can never trigger retrieval.
+    }
+  }
+  const requests = rawRequests
+    .map(parseAdaptiveRequest).filter((request): request is AdaptiveImageRequest => request !== null)
+  return requests.length ? { reason: asString(raw.reason, 'Additional image information requested.'), requests } : undefined;
+}
+
 function parseFinding(value: unknown): FindingEvidence | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
@@ -68,17 +171,23 @@ export function parseStructuredAnalysis(rawText: string): StructuredAnalysis {
     const limitations = Array.isArray(raw.limitations)
       ? raw.limitations.map((value) => asString(value)).filter(Boolean)
       : [];
+    const imageRequest = parseAdaptiveRequestSet(raw.imageRequest);
+    const legacy = parseImageRequest(raw.additionalImageRequest);
+    const nextAction = raw.nextAction === 'request_images' && imageRequest ? 'request_images' : 'complete';
     return {
       summary: asString(raw.summary, 'The model returned no summary.'),
       findings,
       limitations,
-      additionalImageRequest: parseImageRequest(raw.additionalImageRequest),
+      nextAction,
+      imageRequest,
+      additionalImageRequest: legacy,
     };
   } catch {
     return {
       summary: rawText.trim() || 'The model returned no analysis.',
       findings: [],
       limitations: ['The provider did not return the requested structured analysis format.'],
+      nextAction: 'complete',
       additionalImageRequest: { needed: false, selections: [] },
     };
   }
@@ -102,4 +211,3 @@ export function formatStructuredAnalysis(analysis: StructuredAnalysis, imageLabe
   lines.push('', 'Not for clinical diagnosis');
   return lines.join('\n');
 }
-

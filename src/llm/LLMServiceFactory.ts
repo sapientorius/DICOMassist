@@ -95,6 +95,7 @@ const SELECTION_PLAN_OUTPUT_SCHEMA: Record<string, unknown> = {
 const ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
+    nextAction: { type: 'string', enum: ['request_images', 'complete'] },
     summary: { type: 'string' },
     findings: {
       type: 'array',
@@ -110,30 +111,25 @@ const ANALYSIS_OUTPUT_SCHEMA: Record<string, unknown> = {
       },
     },
     limitations: { type: 'array', items: { type: 'string' } },
-    additionalImageRequest: {
-      type: 'object',
-      properties: {
-        needed: { type: 'boolean' },
-        reason: { type: 'string' },
-        selections: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              seriesNumber: { type: 'string' }, role: { type: 'string', enum: ['primary', 'supplementary'] }, rationale: { type: 'string' },
-              sliceRange: { type: 'array', items: { type: 'number' } }, samplingStrategy: { type: 'string', enum: ['uniform', 'every_nth', 'all'] },
-              samplingParam: { anyOf: [{ type: 'number' }, { type: 'null' }] }, windowCenter: { type: 'number' }, windowWidth: { type: 'number' }, coverageGoal: { type: 'string' },
-            },
-            required: ['seriesNumber', 'role', 'rationale', 'sliceRange', 'samplingStrategy', 'samplingParam', 'windowCenter', 'windowWidth', 'coverageGoal'],
-            additionalProperties: false,
+    imageRequest: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          properties: {
+            reason: { type: 'string' },
+            // The detailed retrieval instructions are parsed and validated locally.
+            // Keeping them as JSON text avoids an exponentially large grammar from
+            // the optional fields across the four request and rendering variants.
+            requestsJson: { type: 'string' },
           },
+          required: ['reason', 'requestsJson'],
+          additionalProperties: false,
         },
-      },
-      required: ['needed', 'reason', 'selections'],
-      additionalProperties: false,
+      ],
     },
   },
-  required: ['summary', 'findings', 'limitations', 'additionalImageRequest'],
+  required: ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest'],
   additionalProperties: false,
 };
 
@@ -265,6 +261,10 @@ function connectionError(error: unknown, providerLabel: string): Error {
   return new Error(`Cannot connect to ${providerLabel}. Check its URL, server status, and browser CORS settings.`);
 }
 
+function isSchemaComplexityError(error: Error): boolean {
+  return /schema (?:is )?too complex/i.test(error.message);
+}
+
 function requireApiKey(provider: ProviderType, profile: ProviderProfile): string {
   const environmentKey = provider === 'claude'
     ? import.meta.env.VITE_ANTHROPIC_API_KEY
@@ -358,10 +358,10 @@ class ClaudeService implements LLMService {
       { type: 'text' as const, text: sliceLabels[index] ?? `Image ${index + 1}` },
     ]));
     const response = await this.callClaude(this.visionModel, {
-      system: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined),
+      system: buildAnalysisSystemPrompt(surveyMode, context),
       messages: [{
         role: 'user',
-        content: [...imageContents.flat(), { type: 'text' as const, text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels) }],
+        content: [...imageContents.flat(), { type: 'text' as const, text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, context) }],
       }],
       maxTokens: context?.settings.responseTokenBudget ?? 4096,
       outputSchema: ANALYSIS_OUTPUT_SCHEMA,
@@ -380,6 +380,7 @@ class ClaudeService implements LLMService {
   private async callClaude(
     model: string,
     params: ClaudeCallParams,
+    allowSchemaFallback = true,
   ): Promise<ClaudeResponse> {
     let response: Response;
     try {
@@ -407,7 +408,16 @@ class ClaudeService implements LLMService {
     } catch (error) {
       throw connectionError(error, PROVIDER_LABELS.claude);
     }
-    if (!response.ok) throw await responseError(response, PROVIDER_LABELS.claude);
+    if (!response.ok) {
+      const error = await responseError(response, PROVIDER_LABELS.claude);
+      // A provider-side grammar limit must not make image analysis unavailable.
+      // The prompt still requires JSON and parseStructuredAnalysis validates it
+      // before any image retrieval instruction can be acted upon.
+      if (allowSchemaFallback && params.outputSchema && isSchemaComplexityError(error)) {
+        return this.callClaude(model, { ...params, outputSchema: undefined }, false);
+      }
+      throw error;
+    }
     const data = await response.json() as {
       content?: Array<{ type?: string; text?: string }>;
       stop_reason?: string | null;
@@ -466,8 +476,8 @@ class OllamaService implements LLMService {
     const base64Images = await Promise.all(images.map(blobToBase64));
     const manifest = sliceLabels.map((label, index) => `  ${index + 1}. ${label}`).join('\n');
     return this.callOllama({
-      model: this.visionModel, system: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined), images: base64Images, settings: context?.settings,
-      userContent: `IMAGE MANIFEST (${sliceLabels.length} images, in sequential order):\n${manifest}\n\nThe images are provided in the exact order listed above.\n\n${buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels)}`,
+      model: this.visionModel, system: buildAnalysisSystemPrompt(surveyMode, context), images: base64Images, settings: context?.settings,
+      userContent: `IMAGE MANIFEST (${sliceLabels.length} images, in sequential order):\n${manifest}\n\nThe images are provided in the exact order listed above.\n\n${buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, context)}`,
     }).then(parseStructuredAnalysis);
   }
 
@@ -547,9 +557,9 @@ class OpenAICompatibleService implements LLMService {
         { type: 'text', text: sliceLabels[index] ?? `Image ${index + 1}` },
       );
     }
-    content.push({ type: 'text', text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels) });
+    content.push({ type: 'text', text: buildAnalysisUserPrompt(metadata, clinicalHint, plan, sliceLabels, context) });
     return this.callChat(this.visionModel, [
-      { role: 'system', content: buildAnalysisSystemPrompt(surveyMode, context ? { round: context.refinementRound, remainingRounds: context.remainingRefinementRounds } : undefined) },
+      { role: 'system', content: buildAnalysisSystemPrompt(surveyMode, context) },
       { role: 'user', content },
     ], context?.settings.responseTokenBudget ?? 4096).then(parseStructuredAnalysis);
   }

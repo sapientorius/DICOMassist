@@ -30,7 +30,7 @@ export interface AnalysisBudgetEstimate {
 }
 
 const MIN_IMAGES = 1;
-const MAX_IMAGES = 40;
+const MAX_IMAGES = 100;
 const MIN_IMAGE_PIXELS = 256 * 256;
 const MAX_IMAGE_PIXELS = 1_150_000;
 const MIN_CONTEXT_TOKENS = 4_096;
@@ -55,11 +55,11 @@ const PROFILE_DEFAULTS: Record<Exclude<AnalysisProfileId, 'custom'>, Omit<Analys
     contextWindowTokens: 32_768,
   },
   deep: {
-    maxImages: 32,
+    maxImages: 100,
     maxImagePixels: 786_432,
-    maxRefinementRounds: 2,
+    maxRefinementRounds: 5,
     responseTokenBudget: 6_144,
-    contextWindowTokens: 65_536,
+    contextWindowTokens: 200_000,
   },
 };
 
@@ -90,7 +90,7 @@ export function normaliseAnalysisSettings(value: Partial<AnalysisSettings> | und
     profile,
     maxImages: clampInteger(value?.maxImages, defaults.maxImages, MIN_IMAGES, MAX_IMAGES),
     maxImagePixels: clampInteger(value?.maxImagePixels, defaults.maxImagePixels, MIN_IMAGE_PIXELS, MAX_IMAGE_PIXELS),
-    maxRefinementRounds: clampInteger(value?.maxRefinementRounds, defaults.maxRefinementRounds, 0, 2),
+    maxRefinementRounds: clampInteger(value?.maxRefinementRounds, defaults.maxRefinementRounds, 0, 5),
     responseTokenBudget: clampInteger(value?.responseTokenBudget, defaults.responseTokenBudget, MIN_RESPONSE_TOKENS, Math.min(MAX_RESPONSE_TOKENS, largestUsableResponse)),
     contextWindowTokens,
   };

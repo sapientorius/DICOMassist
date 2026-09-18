@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   selectSlicesForSelection: vi.fn(),
   selectOverviewSlices: vi.fn(() => []),
   exportSlicesToJpeg: vi.fn(),
+  resolveRenderSpec: vi.fn(async (_series, spec) => ({ label: spec.label || 'DICOM default', windowCenter: 40, windowWidth: 400, key: spec.mode })),
   createSliceMontage: vi.fn(async () => null),
 }));
 
@@ -20,7 +21,7 @@ vi.mock('../filtering/SliceSelector', () => ({
   selectSlicesForSelection: mocks.selectSlicesForSelection,
   selectOverviewSlices: mocks.selectOverviewSlices,
 }));
-vi.mock('../filtering/SliceExporter', () => ({ exportSlicesToJpeg: mocks.exportSlicesToJpeg }));
+vi.mock('../filtering/SliceExporter', () => ({ exportSlicesToJpeg: mocks.exportSlicesToJpeg, resolveRenderSpec: mocks.resolveRenderSpec }));
 vi.mock('../filtering/SliceMontage', () => ({ createSliceMontage: mocks.createSliceMontage }));
 
 import { useLLMChat } from './useLLMChat';
@@ -46,16 +47,22 @@ describe('adaptive planning pipeline', () => {
     })));
   });
 
-  it('routes a concrete vision request through the planner and stops after the targeted second analysis', async () => {
+  it('executes a concrete vision image request directly and stops after the targeted second analysis', async () => {
     const service = {
-      getSelectionPlan: vi.fn().mockResolvedValueOnce(plan([1, 1])).mockResolvedValueOnce(plan([10, 12])),
+      getSelectionPlan: vi.fn().mockResolvedValueOnce(plan([1, 1])),
       analyzeSlices: vi.fn()
         .mockResolvedValueOnce({
           summary: 'Need more coverage.', findings: [], limitations: [],
-          additionalImageRequest: { needed: true, reason: 'Adjacent slices are needed.', selections: plan([10, 12]).selections },
+          nextAction: 'request_images',
+          imageRequest: {
+            reason: 'Adjacent slices are needed.',
+            requests: [{ kind: 'neighbours', sourceImageIndex: 1, before: 0, after: 1, renderings: [{ mode: 'dicom-default' }] }],
+          },
+          additionalImageRequest: { needed: false, selections: [] },
         })
         .mockResolvedValueOnce({
           summary: 'Targeted images reviewed.', findings: [{ summary: 'Visible feature', confidence: 'possible', imageIndices: [2] }], limitations: [],
+          nextAction: 'complete',
           additionalImageRequest: { needed: false, selections: [] },
         }),
       sendFollowUp: vi.fn(),
@@ -75,11 +82,10 @@ describe('adaptive planning pipeline', () => {
     await chat.startAnalysis('evaluate target');
     await chat.confirmPlan(chat.currentPlan.value!);
 
-    expect(service.getSelectionPlan).toHaveBeenCalledTimes(2);
+    expect(service.getSelectionPlan).toHaveBeenCalledTimes(1);
     expect(service.analyzeSlices).toHaveBeenCalledTimes(2);
     expect(chat.pipeline.value?.comparisonLog.rounds).toHaveLength(2);
     expect(chat.pipeline.value?.refinementRound).toBe(1);
     expect(chat.messages.value.at(-1)?.content).toContain('Targeted images reviewed.');
   });
 });
-

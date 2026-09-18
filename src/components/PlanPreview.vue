@@ -58,11 +58,11 @@ function accept(): void {
         <p v-if="row.displayWindows?.length" class="mt-1 text-[10px] text-blue-300">Additional display: {{ row.displayWindows.map((window) => `${window.label} W:${window.windowWidth} C:${window.windowCenter}`).join(' · ') }}</p>
       </div>
     </div>
-    <p class="mt-2 text-[11px]" :class="imageCount + 1 > budgetLimit ? 'text-red-300' : 'text-neutral-500'">{{ imageCount }} detail + 1 overview / {{ budgetLimit }} images · ~{{ Math.round((budget?.estimatedInputTokens ?? 0) / 100) / 10 }}k estimated input tokens</p>
+    <p class="mt-2 text-[11px]" :class="imageCount + plan.selections.length > budgetLimit ? 'text-red-300' : 'text-neutral-500'">{{ imageCount }} detail + {{ plan.selections.length }} overview / {{ budgetLimit }} images · ~{{ Math.round((budget?.estimatedInputTokens ?? 0) / 100) / 10 }}k estimated input tokens</p>
     <p v-for="warning in budget?.warnings" :key="warning" class="mt-1 text-[10px] text-amber-300">{{ warning }}</p>
     <div class="mt-3 flex justify-end gap-2">
       <button class="rounded px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-800" @click="emit('cancel')">Cancel</button>
-      <button class="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white disabled:opacity-50" :disabled="imageCount + 1 > budgetLimit" @click="accept">Analyze images</button>
+      <button class="rounded bg-blue-600 px-2 py-1 text-xs font-medium text-white disabled:opacity-50" :disabled="imageCount + plan.selections.length > budgetLimit" @click="accept">Analyze images</button>
     </div>
   </section>
 </template>

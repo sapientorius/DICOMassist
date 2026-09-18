@@ -7,6 +7,62 @@ export interface DisplayWindow {
   windowWidth: number;
 }
 
+/** A display instruction applied locally to the original DICOM pixels. */
+export type RenderSpec =
+  | { mode: 'dicom-default'; label?: string }
+  | { mode: 'window-level'; windowCenter: number; windowWidth: number; label?: string }
+  | { mode: 'series-percentile'; lowPercentile: number; highPercentile: number; label?: string }
+  | { mode: 'relative-display'; brightness: 'darker' | 'default' | 'brighter'; contrast: 'lower' | 'default' | 'higher'; label?: string };
+
+export interface NormalizedCrop {
+  /** [left, top, width, height], all in the inclusive 0–1 image coordinate space. */
+  rect: [number, number, number, number];
+}
+
+export interface InstanceImageRequest {
+  kind: 'instances';
+  seriesInstanceUID: string;
+  instanceNumbers?: number[];
+  sliceRange?: [number, number];
+  samplingStrategy?: 'every_nth' | 'uniform' | 'all';
+  samplingParam?: number;
+  renderings: RenderSpec[];
+  priority?: number;
+}
+
+export interface NeighbourImageRequest {
+  kind: 'neighbours';
+  sourceImageIndex: number;
+  before: number;
+  after: number;
+  renderings: RenderSpec[];
+  priority?: number;
+}
+
+export interface CropImageRequest extends NormalizedCrop {
+  kind: 'crop';
+  sourceImageIndex: number;
+  renderings: RenderSpec[];
+  priority?: number;
+}
+
+export interface CrossPlaneImageRequest {
+  kind: 'cross-plane';
+  sourceImageIndex: number;
+  targetSeriesInstanceUID: string;
+  /** Number of native slices on either side of the nearest corresponding plane. */
+  neighbours?: number;
+  renderings: RenderSpec[];
+  priority?: number;
+}
+
+export type AdaptiveImageRequest = InstanceImageRequest | NeighbourImageRequest | CropImageRequest | CrossPlaneImageRequest;
+
+export interface AdaptiveImageRequestSet {
+  reason: string;
+  requests: AdaptiveImageRequest[];
+}
+
 export interface SeriesSelection {
   seriesNumber: string;
   role: 'primary' | 'supplementary';
@@ -73,6 +129,10 @@ export interface StructuredAnalysis {
   summary: string;
   findings: FindingEvidence[];
   limitations: string[];
+  /** The only state transition that may trigger another vision round. */
+  nextAction: 'request_images' | 'complete';
+  imageRequest?: AdaptiveImageRequestSet;
+  /** Retained only to parse output from pre-adaptive local models. */
   additionalImageRequest: AdditionalImageRequest;
 }
 
@@ -80,6 +140,10 @@ export interface AnalysisRequestContext {
   settings: AnalysisSettings;
   refinementRound: number;
   remainingRefinementRounds: number;
+  remainingImageBudget?: number;
+  maxNewImages?: number;
+  imageManifest?: string;
+  seriesCatalog?: string;
 }
 
 /**

@@ -1,5 +1,5 @@
 import type { StudyMetadata, SeriesMetadata } from '../dicom/types';
-import type { SelectionPlan, ViewportContext } from './types';
+import type { AnalysisRequestContext, SelectionPlan, ViewportContext } from './types';
 import type { AnalysisSettings } from './analysisConfig';
 
 const DISCLAIMER =
@@ -283,7 +283,7 @@ export function buildSurveyResponseFormat(): string[] {
 
 export function buildAnalysisSystemPrompt(
   surveyMode?: boolean,
-  refinement?: { round: number; remainingRounds: number },
+  refinement?: Pick<AnalysisRequestContext, 'refinementRound' | 'remainingRefinementRounds' | 'remainingImageBudget' | 'maxNewImages'>,
 ): string {
   return [
     'You are a medical imaging AI assistant analyzing DICOM images.',
@@ -334,18 +334,25 @@ export function buildAnalysisSystemPrompt(
     '',
     '## OUTPUT FORMAT (MANDATORY)',
     'Return ONLY a JSON object with these fields:',
+    '- nextAction: "request_images" | "complete"',
     '- summary: string',
     '- findings: array of {summary, confidence: "definite"|"probable"|"possible"|"indeterminate", imageIndices: number[]}',
     '- limitations: string[]',
-    '- additionalImageRequest: {needed: boolean, reason: string, selections: []}',
-    'Each additionalImageRequest selection must contain seriesNumber, role, rationale,',
-    'sliceRange [start,end], samplingStrategy, samplingParam, windowCenter, windowWidth,',
-    'and coverageGoal. Set needed=true only for a specific visual blind spot that',
-    'additional slices or a different series could resolve.',
+    '- imageRequest: null when nextAction is "complete"; otherwise {reason, requestsJson}.',
+    '- requestsJson is a JSON-encoded string containing the requests array (no markdown or prose inside the string).',
+    'Each request has a kind, renderings, and optional priority. Supported kinds are:',
+    '- instances: seriesInstanceUID plus instanceNumbers or sliceRange, with optional samplingStrategy and samplingParam.',
+    '- neighbours: sourceImageIndex plus before and after counts.',
+    '- crop: sourceImageIndex plus rect [left,top,width,height] in 0–1 image coordinates.',
+    '- cross-plane: sourceImageIndex plus targetSeriesInstanceUID and optional neighbours.',
+    'renderings is one or more of: dicom-default; window-level with windowCenter/windowWidth;',
+    'series-percentile with lowPercentile/highPercentile; or relative-display with brightness',
+    '(darker/default/brighter) and contrast (lower/default/higher). Every rendering counts against the image budget.',
+    'Use request_images instead of a final conclusion whenever targeted images, another display, a crop, or another plane could resolve the visual question.',
     refinement
-      ? refinement.remainingRounds > 0
-        ? `This is refinement round ${refinement.round}. At most ${refinement.remainingRounds} additional round(s) remain; request only the minimum targeted images needed.`
-        : 'No additional image rounds remain. Set additionalImageRequest.needed=false.'
+      ? refinement.remainingRefinementRounds > 0 && (refinement.remainingImageBudget ?? 0) > 0
+        ? `This is refinement round ${refinement.refinementRound}. ${refinement.remainingRefinementRounds} round(s), ${refinement.remainingImageBudget ?? 0} total image slot(s), and ${refinement.maxNewImages ?? 0} new image slot(s) are available now. Request only what fits in this round.`
+        : 'No additional image rounds or image slots remain. Set nextAction to complete.'
       : 'Request additional images only when a specific visual blind spot remains.',
   ].join('\n');
 }
@@ -355,6 +362,7 @@ export function buildAnalysisUserPrompt(
   clinicalHint: string,
   plan: SelectionPlan,
   sliceLabels: string[],
+  context?: Pick<AnalysisRequestContext, 'imageManifest' | 'seriesCatalog'>,
 ): string {
   const lines = [
     `Analyze ONLY the following ${sliceLabels.length} images.`,
@@ -414,6 +422,12 @@ export function buildAnalysisUserPrompt(
   lines.push('');
   lines.push('When referencing findings, cite the series and slice number (e.g., "Series #3 Slice 45/187") so the reader can navigate to it in the viewer.');
   lines.push('IMPORTANT: Only reference slice numbers from the list above. Do NOT invent or guess slice numbers that were not provided.');
+  if (context?.seriesCatalog) {
+    lines.push('', '=== FULL LOCAL SERIES CATALOG ===', context.seriesCatalog);
+  }
+  if (context?.imageManifest) {
+    lines.push('', '=== DELIVERED IMAGE MANIFEST ===', context.imageManifest);
+  }
 
   return lines.join('\n');
 }

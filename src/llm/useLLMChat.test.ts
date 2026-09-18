@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { makeStudy } from '../test/fixtures/study';
 import type { AdditionalImageRequest, SelectionPlan } from './types';
-import { canRunRefinement, fixSelectionPlan } from './useLLMChat';
+import { assertVisionPayloadFits, canRunRefinement, fixSelectionPlan } from './useLLMChat';
 
 function plan(overrides: Partial<SelectionPlan> = {}): SelectionPlan {
   return {
@@ -45,5 +45,10 @@ describe('fixSelectionPlan', () => {
     expect(canRunRefinement(request, 1, 2, 4)).toBe(true);
     expect(canRunRefinement(request, 2, 2, 4)).toBe(false);
     expect(canRunRefinement(request, 0, 2, 0)).toBe(false);
+  });
+
+  it('checks the actual rendered blob payload before a provider request', () => {
+    expect(() => assertVisionPayloadFits([new Blob(['small'])], 'claude')).not.toThrow();
+    expect(() => assertVisionPayloadFits([new Blob([new Uint8Array(20 * 1024 * 1024 + 1)])], 'openai')).toThrow('above the 20MB openai limit');
   });
 });
