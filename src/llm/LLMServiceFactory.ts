@@ -33,6 +33,7 @@ interface ChatMessagePayload {
 interface ClaudeResponse {
   text: string;
   stopReason?: string | null;
+  contentTypes: string[];
 }
 
 interface ClaudeCallParams {
@@ -40,7 +41,7 @@ interface ClaudeCallParams {
   messages: Array<{ role: string; content: unknown }>;
   maxTokens: number;
   outputSchema?: Record<string, unknown>;
-  adaptiveThinking?: boolean;
+  thinking?: { type: 'adaptive' | 'disabled' };
 }
 
 /**
@@ -142,6 +143,23 @@ function extractJson(text: string): string {
   const braceEnd = text.lastIndexOf('}');
   if (braceStart !== -1 && braceEnd > braceStart) return text.slice(braceStart, braceEnd + 1);
   return text.trim();
+}
+
+/**
+ * Claude structured output should always include this complete top-level shape.
+ * Check it before accepting a response so a transient empty/non-text response
+ * gets one recovery attempt instead of becoming a misleading empty analysis.
+ */
+function hasStructuredAnalysisShape(text: string): boolean {
+  try {
+    const value = JSON.parse(extractJson(text));
+    if (!value || typeof value !== 'object') return false;
+    const raw = value as Record<string, unknown>;
+    return ['nextAction', 'summary', 'findings', 'limitations', 'imageRequest']
+      .every((key) => Object.prototype.hasOwnProperty.call(raw, key));
+  } catch {
+    return false;
+  }
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -316,7 +334,7 @@ class ClaudeService implements LLMService {
       messages: [{ role: 'user', content: buildSelectionUserPrompt(metadata, clinicalHint, viewportContext) }],
       maxTokens: 4096,
       outputSchema: SELECTION_PLAN_OUTPUT_SCHEMA,
-      adaptiveThinking: this.supportsAdaptiveThinking(this.textModel),
+      thinking: this.supportsAdaptiveThinking(this.textModel) ? { type: 'adaptive' } : undefined,
     };
 
     let response = await this.callClaude(this.textModel, params);
@@ -357,7 +375,7 @@ class ClaudeService implements LLMService {
       },
       { type: 'text' as const, text: sliceLabels[index] ?? `Image ${index + 1}` },
     ]));
-    const response = await this.callClaude(this.visionModel, {
+    const params: ClaudeCallParams = {
       system: buildAnalysisSystemPrompt(surveyMode, context),
       messages: [{
         role: 'user',
@@ -365,7 +383,30 @@ class ClaudeService implements LLMService {
       }],
       maxTokens: context?.settings.responseTokenBudget ?? 4096,
       outputSchema: ANALYSIS_OUTPUT_SCHEMA,
-    });
+      // Sonnet/Opus 5 enable adaptive thinking by default. For a compact,
+      // schema-constrained result, reserve the complete output budget for the
+      // executable JSON response rather than internal reasoning.
+      thinking: this.supportsAdaptiveThinking(this.visionModel) ? { type: 'disabled' } : undefined,
+    };
+    let response = await this.callClaude(this.visionModel, params);
+
+    // A 200 response can contain only a thinking block or malformed text. Retry
+    // once with the same local images and schema; never turn that into a blank
+    // clinical-looking chat response.
+    if (!hasStructuredAnalysisShape(response.text)) {
+      response = await this.callClaude(this.visionModel, {
+        ...params,
+        system: `${params.system}\n\nRECOVERY: Your previous response was empty or did not match the required JSON schema. Return the complete JSON object now. Do not include explanation, markdown, or internal reasoning.`,
+      });
+    }
+    if (!hasStructuredAnalysisShape(response.text)) {
+      const stopReason = response.stopReason ?? 'unknown';
+      const contentTypes = response.contentTypes.length ? response.contentTypes.join(', ') : 'none';
+      throw new Error(
+        `Claude returned no usable structured analysis after one retry (stop reason: ${stopReason}; content blocks: ${contentTypes}). ` +
+        'No incomplete analysis was displayed. Try the analysis again or select a smaller image budget.',
+      );
+    }
     return parseStructuredAnalysis(response.text);
   }
 
@@ -394,7 +435,7 @@ class ClaudeService implements LLMService {
           model,
           max_tokens: params.maxTokens,
           ...(this.shouldOmitTemperature(model) ? {} : { temperature: 0 }),
-          ...(params.adaptiveThinking ? { thinking: { type: 'adaptive' } } : {}),
+          ...(params.thinking ? { thinking: params.thinking } : {}),
           ...(params.outputSchema ? {
             output_config: {
               format: { type: 'json_schema', schema: params.outputSchema },
@@ -422,9 +463,14 @@ class ClaudeService implements LLMService {
       content?: Array<{ type?: string; text?: string }>;
       stop_reason?: string | null;
     };
+    const content = data.content ?? [];
     return {
-      text: data.content?.find((block) => block.type === 'text')?.text ?? '',
+      text: content
+        .filter((block) => block.type === 'text' && typeof block.text === 'string')
+        .map((block) => block.text)
+        .join('\n'),
       stopReason: data.stop_reason,
+      contentTypes: content.map((block) => block.type ?? 'unknown'),
     };
   }
 
